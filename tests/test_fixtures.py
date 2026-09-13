@@ -24,3 +24,13 @@ def test_loader_settings_override_older_block_capture():
     """justice_inv1_settings.json is newer, so it wins on 0xE000-0xE02F."""
     regs = load_justice_registers()
     assert regs[0xE00D] == 122
+
+
+def test_justice_registers_fixture_matches_loader(justice_registers):
+    """The `justice_registers` pytest fixture must expose the same data.
+
+    Later tasks consume it by name (not the plain function); a typo in its
+    `name="justice_registers"` registration must fail here, not inside a
+    downstream task's tests.
+    """
+    assert justice_registers == load_justice_registers()
