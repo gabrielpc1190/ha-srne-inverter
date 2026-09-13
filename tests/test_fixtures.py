@@ -24,3 +24,13 @@ def test_loader_settings_override_older_block_capture():
     """client_inv1_settings.json is newer, so it wins on 0xE000-0xE02F."""
     regs = load_client_registers()
     assert regs[0xE00D] == 122
+
+
+def test_client_registers_fixture_matches_loader(client_registers):
+    """The `client_registers` pytest fixture must expose the same data.
+
+    Later tasks consume it by name (not the plain function); a typo in its
+    `name="client_registers"` registration must fail here, not inside a
+    downstream task's tests.
+    """
+    assert client_registers == load_client_registers()
