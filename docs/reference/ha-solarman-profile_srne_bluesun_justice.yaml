@@ -1,0 +1,723 @@
+#
+# SRNE-based Energy Storage Inverter | BlueSun 10 kW | Casa Justice
+#
+# Site: Casa Justice (Nicolas Rowley), Las Brisas - 2x BlueSun SPI-10K-UP
+# hybrid inverters (SRNE OEM hardware) + BlueSun battery bank (4 packs).
+# Firmware: V8.18.006
+# Register map: SRNE "Energy Storage Inverter" Modbus protocol V1.96
+#
+# NOTE: this is NOT the same register layout as the stock HACS profile
+# "srne_asf.yaml" (three-phase ASF hybrid). Only the YAML syntax/conventions
+# were copied from srne_asf.yaml (rule numbers, group/items shape, lookup,
+# platform: number/select, configurable/range, sensors: composites) - the
+# register ADDRESSES and their meanings were verified independently against
+# this firmware and differ from srne_asf.yaml at several points (e.g. 0x0212
+# is "Bus Voltage" here, not "PV Voltage"; 0x022B is "Grid Current L2" here,
+# not "Grid L3 Voltage").
+#
+# Registers verified present by live Modbus read against this firmware.
+# Do NOT add registers outside these confirmed blocks without re-verifying -
+# 0x0112+ and 0xE03A+ return Illegal Data Address on this device:
+#   0x0014-0x0016 (version)    0x0100-0x010E (battery)
+#   0x0200-0x023F (inverter)   0xE000-0xE02F (settings)
+#   0xE200-0xE21E (settings)   0xF02C-0xF043 (meter)
+#
+# NOTE on register 0x0102 (Battery Current): on THIS firmware a NEGATIVE raw
+# value means charging (opposite of the usual convention). "Battery Current"
+# below uses scale: -0.1 so a POSITIVE reading means charging (the negation
+# and the x0.1 unit scale happen in the same multiply). "Battery Power"
+# mirrors the same sign convention - see the comment on that item.
+#
+
+info:
+  manufacturer: SRNE
+  model: "BlueSun SPI-10K-UP (Casa Justice)"
+
+default:
+  update_interval: 10
+  max_size: 30
+  digits: 6
+
+parameters:
+  - group: Battery
+    items:
+      - name: "Battery"
+        class: "battery"
+        state_class: "measurement"
+        uom: "%"
+        rule: 1
+        registers: [0x0100]
+
+      - name: "Battery Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 1
+        registers: [0x0101]
+
+      - name: "Battery Current"
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        # Negated on purpose: raw register is NEGATIVE while charging on this
+        # firmware. scale: -0.1 both converts the 0.1 A unit AND flips the
+        # sign, so a positive reading here means the battery is charging.
+        scale: -0.1
+        rule: 2
+        registers: [0x0102]
+        icon: "mdi:current-dc"
+
+      - name: "Battery Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        rule: 2
+        digits: 3
+        # A composite "sensors:" item is NOT run through the normal
+        # register-read path, so a top-level "scale:" here would be silently
+        # ignored by the integration (only try_parse_(un)signed applies
+        # "scale", and composites go through _read_registers_custom
+        # instead). The x0.1 V x0.1 A unit scale (-> x0.01 combined) is
+        # therefore applied on the second (multiplied) sensor below, and its
+        # sign is flipped there too (raw current is negative while charging
+        # on this firmware - see "Battery Current" above), so a positive
+        # Battery Power reading means the battery is charging.
+        sensors:
+          - registers: [0x0101]
+          - operator: multiply
+            signed:
+            scale: -0.01
+            registers: [0x0102]
+
+      - name: "Battery Temperature"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 0.1
+        rule: 2
+        registers: [0x0103]
+
+      - name: "Charge State"
+        class: "enum"
+        rule: 1
+        registers: [0x010B]
+        icon: "mdi:battery-charging"
+        lookup:
+          - key: 0
+            value: "Off"
+          - key: 1
+            value: "Quick charge (CC)"
+          - key: 2
+            value: "Constant voltage"
+          - key: 4
+            value: "Float"
+          - key: 6
+            value: "Li activation"
+          - key: 8
+            value: "Full"
+
+  - group: Inverter
+    items:
+      - name: "Firmware Version"
+        rule: 1
+        registers: [0x0014]
+
+      - name: "Machine State"
+        class: "enum"
+        rule: 1
+        registers: [0x0210]
+        icon: "mdi:state-machine"
+        lookup:
+          - key: 0
+            value: "Init"
+          - key: 1
+            value: "Standby"
+          - key: 2
+            value: "AC bypass"
+          - key: 3
+            value: "Inverter"
+
+      - name: "Bus Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 1
+        registers: [0x0212]
+
+      - name: "Grid Voltage L1"
+        l: 1
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 1
+        registers: [0x0213]
+        icon: "mdi:transmission-tower"
+
+      - name: "Grid Current L1"
+        l: 1
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 1
+        registers: [0x0214]
+        icon: "mdi:transmission-tower"
+
+      - name: "Grid Frequency"
+        class: "frequency"
+        state_class: "measurement"
+        uom: "Hz"
+        scale: 0.01
+        rule: 1
+        registers: [0x0215]
+
+      - name: "Output Voltage L1"
+        l: 1
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 1
+        registers: [0x0216]
+
+      - name: "Output Current L1"
+        l: 1
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 2
+        registers: [0x0217]
+
+      - name: "Output Frequency"
+        class: "frequency"
+        state_class: "measurement"
+        uom: "Hz"
+        scale: 0.01
+        rule: 1
+        registers: [0x0218]
+
+      - name: "Load Power L1"
+        l: 1
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        rule: 1
+        registers: [0x021B]
+
+      - name: "Load Apparent Power L1"
+        l: 1
+        class: "apparent_power"
+        state_class: "measurement"
+        uom: "VA"
+        rule: 1
+        registers: [0x021C]
+
+      - name: "Load Percentage"
+        state_class: "measurement"
+        uom: "%"
+        rule: 1
+        registers: [0x021F]
+        icon: "mdi:gauge"
+
+      # Current flowing from the grid into the battery charger - the
+      # register at the center of the open "carga desde red" diagnostic for
+      # this site.
+      - name: "Grid Charge Current"
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 1
+        registers: [0x021E]
+        icon: "mdi:transmission-tower"
+
+      - name: "Temperature DC-DC"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 0.1
+        rule: 2
+        registers: [0x0220]
+
+      - name: "Temperature Inverter"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 0.1
+        rule: 2
+        registers: [0x0221]
+
+      - name: "Temperature Transformer"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 0.1
+        rule: 2
+        registers: [0x0222]
+
+      - name: "Grid Voltage L2"
+        l: 2
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 1
+        registers: [0x022A]
+        icon: "mdi:transmission-tower"
+
+      - name: "Grid Current L2"
+        l: 2
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 1
+        registers: [0x022B]
+        icon: "mdi:transmission-tower"
+
+      - name: "Output Voltage L2"
+        l: 2
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 1
+        registers: [0x022C]
+
+      - name: "Output Current L2"
+        l: 2
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 2
+        registers: [0x022E]
+
+      - name: "Load Power L2"
+        l: 2
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        rule: 1
+        registers: [0x0232]
+
+      - name: "Load Apparent Power L2"
+        l: 2
+        class: "apparent_power"
+        state_class: "measurement"
+        uom: "VA"
+        rule: 1
+        registers: [0x0234]
+
+      - name: "Fault Word 1"
+        rule: 1
+        registers: [0x0204]
+        icon: "mdi:alert"
+
+      - name: "Fault Word 2"
+        rule: 1
+        registers: [0x0205]
+        icon: "mdi:alert"
+
+      - name: "Fault Word 3"
+        rule: 1
+        registers: [0x0206]
+        icon: "mdi:alert"
+
+      - name: "Fault Word 4"
+        rule: 1
+        registers: [0x0207]
+        icon: "mdi:alert"
+
+  - group: Settings
+    update_interval: 300
+    items:
+      - name: "Output Priority"
+        platform: select
+        rule: 1
+        registers: [0xE204]
+        icon: "mdi:transmission-tower"
+        lookup:
+          - key: 0
+            value: "SOL"
+          - key: 1
+            value: "UTI"
+          - key: 2
+            value: "SBU"
+          - key: 3
+            value: "SUB"
+
+      - name: "AC Charge Current Limit"
+        platform: number
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 1
+        registers: [0xE205]
+        icon: "mdi:current-dc"
+        configurable:
+          mode: box
+          min: 0
+          max: 120
+          step: 1
+        # range is in RAW register units (pre-scale): 0-1200 raw x0.1 = 0-120 A
+        range:
+          min: 0
+          max: 1200
+
+      - name: "Max Charge Current"
+        platform: number
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 1
+        registers: [0xE20A]
+        icon: "mdi:current-dc"
+        configurable:
+          mode: box
+          min: 0
+          max: 200
+        # range is in RAW register units (pre-scale): 0-2000 raw x0.1 = 0-200 A
+        range:
+          min: 0
+          max: 2000
+
+      - name: "Charge Priority"
+        platform: select
+        rule: 1
+        registers: [0xE20F]
+        icon: "mdi:solar-power-variant"
+        lookup:
+          - key: 0
+            value: "CSO (PV first)"
+          - key: 1
+            value: "CUB (utility first)"
+          - key: 2
+            value: "SNU (PV+utility)"
+          - key: 3
+            value: "OSO (PV only)"
+
+      - name: "Battery Type"
+        platform: select
+        rule: 1
+        registers: [0xE004]
+        icon: "mdi:battery"
+        lookup:
+          - key: 0
+            value: "USER"
+          - key: 1
+            value: "SLD"
+          - key: 2
+            value: "FLD"
+          - key: 3
+            value: "GEL"
+          - key: 4
+            value: "L14"
+          - key: 5
+            value: "L15"
+          - key: 6
+            value: "L16"
+          - key: 7
+            value: "N13"
+          - key: 8
+            value: "N14"
+          - key: 9
+            value: "No battery"
+
+      - name: "BMS Communication"
+        platform: select
+        rule: 1
+        registers: [0xE215]
+        lookup:
+          - key: 0
+            value: "SLA (off)"
+          - key: 1
+            value: "RS485"
+          - key: 2
+            value: "CAN"
+
+      - name: "BMS Protocol"
+        platform: select
+        rule: 1
+        registers: [0xE21B]
+        lookup:
+          - key: 0
+            value: "PAC"
+          - key: 1
+            value: "RDA"
+          - key: 2
+            value: "AOG"
+          - key: 3
+            value: "OLT"
+          - key: 4
+            value: "HWD"
+          - key: 5
+            value: "DAQ"
+          - key: 6
+            value: "WOW"
+          - key: 7
+            value: "SRNE"
+          - key: 8
+            value: "PYL"
+          - key: 9
+            value: "UOL"
+          - key: 10
+            value: "Code 10"
+          - key: 11
+            value: "Code 11"
+          - key: 12
+            value: "Code 12"
+          - key: 13
+            value: "Code 13"
+          - key: 14
+            value: "Code 14"
+          - key: 15
+            value: "Code 15"
+
+      - name: "BMS Charge Current Limit Mode"
+        platform: select
+        rule: 1
+        registers: [0xE025]
+        icon: "mdi:current-dc"
+        lookup:
+          - key: 0
+            value: "LCSET"
+          - key: 1
+            value: "LCBMS"
+          - key: 2
+            value: "LCINV"
+
+      - name: "Charge Stop Current"
+        platform: number
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.1
+        rule: 1
+        registers: [0xE01C]
+        icon: "mdi:current-dc"
+        configurable:
+          mode: box
+          min: 0
+          max: 10
+        # range is in RAW register units (pre-scale): 0-100 raw x0.1 = 0-10 A
+        range:
+          min: 0
+          max: 100
+
+      - name: "Charge Stop SOC"
+        platform: number
+        state_class: "measurement"
+        uom: "%"
+        rule: 1
+        registers: [0xE01D]
+        icon: "mdi:battery"
+        configurable:
+          mode: box
+        range:
+          min: 0
+          max: 100
+
+      - name: "Discharge Stop SOC"
+        platform: number
+        state_class: "measurement"
+        uom: "%"
+        rule: 1
+        registers: [0xE00F]
+        icon: "mdi:battery"
+        configurable:
+          mode: box
+        range:
+          min: 0
+          max: 100
+
+      - name: "SOC Low Alarm"
+        platform: number
+        state_class: "measurement"
+        uom: "%"
+        rule: 1
+        registers: [0xE01E]
+        icon: "mdi:battery"
+        configurable:
+          mode: box
+        range:
+          min: 0
+          max: 100
+
+      - name: "SOC To Line"
+        platform: number
+        state_class: "measurement"
+        uom: "%"
+        rule: 1
+        registers: [0xE01F]
+        icon: "mdi:battery"
+        configurable:
+          mode: box
+        range:
+          min: 0
+          max: 100
+
+      - name: "SOC To Battery"
+        platform: number
+        state_class: "measurement"
+        uom: "%"
+        rule: 1
+        registers: [0xE020]
+        icon: "mdi:battery"
+        configurable:
+          mode: box
+        range:
+          min: 0
+          max: 100
+
+      # Voltage thresholds below are stored in "12V-equivalent" units per the
+      # SRNE spec: real_voltage = raw / 10 * 4, i.e. scale: 0.4. Read-only -
+      # no verified safe write range for this firmware, so these are plain
+      # sensors, not platform: number.
+      - name: "Boost Charge Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.4
+        rule: 1
+        registers: [0xE008]
+        icon: "mdi:battery"
+
+      - name: "Float Charge Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.4
+        rule: 1
+        registers: [0xE009]
+        icon: "mdi:battery"
+
+      - name: "Recharge Voltage Threshold"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.4
+        rule: 1
+        registers: [0xE00A]
+        icon: "mdi:battery"
+
+      - name: "Under-voltage Recovery"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.4
+        rule: 1
+        registers: [0xE00B]
+        icon: "mdi:battery"
+
+      - name: "Under-voltage Alarm"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.4
+        rule: 1
+        registers: [0xE00C]
+        icon: "mdi:battery"
+
+      - name: "Over-discharge Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.4
+        rule: 1
+        registers: [0xE00D]
+        icon: "mdi:battery"
+
+      - name: "Discharge Limit Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.4
+        rule: 1
+        registers: [0xE00E]
+        icon: "mdi:battery"
+
+      - name: "Parallel Mode"
+        rule: 1
+        registers: [0xE201]
+
+      - name: "Output Phase Mode"
+        rule: 1
+        registers: [0xE21E]
+
+      - name: "RS485 Address"
+        rule: 1
+        registers: [0xE200]
+
+  - group: Meter
+    update_interval: 30
+    items:
+      - name: "Today Battery Charge"
+        state_class: "total_increasing"
+        uom: "Ah"
+        rule: 1
+        registers: [0xF02D]
+        icon: "mdi:battery-plus"
+
+      - name: "Today Battery Discharge"
+        state_class: "total_increasing"
+        uom: "Ah"
+        rule: 1
+        registers: [0xF02E]
+        icon: "mdi:battery-minus"
+
+      - name: "Today Load Consumption"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 0.1
+        rule: 1
+        registers: [0xF030]
+
+      - name: "Today Grid Charge"
+        state_class: "total_increasing"
+        uom: "Ah"
+        rule: 1
+        registers: [0xF03C]
+        icon: "mdi:battery-plus"
+
+      - name: "Total Battery Charge"
+        state_class: "total_increasing"
+        uom: "Ah"
+        rule: 3
+        registers: [0xF034, 0xF035]
+        icon: "mdi:battery-plus"
+        validation:
+          min: 0.1
+
+      - name: "Total Battery Discharge"
+        state_class: "total_increasing"
+        uom: "Ah"
+        rule: 3
+        registers: [0xF036, 0xF037]
+        icon: "mdi:battery-minus"
+        validation:
+          min: 0.1
+
+      - name: "Total Load Consumption"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 0.1
+        rule: 3
+        registers: [0xF03A, 0xF03B]
+        validation:
+          min: 0.1
+
+      - name: "Total Running Days"
+        state_class: "total_increasing"
+        uom: "d"
+        rule: 1
+        registers: [0xF02C]
+        icon: "mdi:counter"
