@@ -23,7 +23,7 @@ y sin suponer que todas las unidades son iguales. Decisión del 2026-09-13 (~10:
 cruza subredes y sus perfiles no sondean capacidades por unidad. GADI (2 SunGoldPower por RS485 con
 `inverter-bridge`) queda fuera: el logger no daría más datos.
 
-## Estado (2026-09-13 11:00 CST)
+## Estado (2026-09-13 12:30 CST)
 
 - ✅ **Diseño aprobado en alcance**: [`docs/superpowers/specs/2026-09-13-srne-inverter-integration-design.md`](docs/superpowers/specs/2026-09-13-srne-inverter-integration-design.md)
   (hechos verificados de los equipos, arquitectura, entidades v1, pruebas, despliegue). Leerlo antes de tocar código.
@@ -34,11 +34,7 @@ cruza subredes y sus perfiles no sondean capacidades por unidad. GADI (2 SunGold
   gestionado **3.14.7**), `homeassistant==2026.9.2` vía `pytest-homeassistant-custom-component==0.13.365`,
   `pysolarmanv5` 3.0.6, `pytest-asyncio`. ⚠️ HA 2026.9 exige Python ≥ 3.14 (3.13 no resuelve). Recrear:
   `uv venv --python 3.14 .venv && uv pip install --python .venv/bin/python pytest-homeassistant-custom-component==0.13.365 "pysolarmanv5>=3.0.6" pytest-asyncio`.
-- ⏳ **Plan de implementación**: lo redacta un subagente Opus en
-  `docs/superpowers/plans/2026-09-13-srne-inverter-integration.md` (si el archivo no existe, el plan no llegó a
-  escribirse: regenerarlo con un subagente `model: opus` a partir de la spec — el prompt pide formato
-  `superpowers:writing-plans`, tareas con TDD, transporte falso con los crudos de Justice, prueba en vivo solo
-  lectura, despliegue y vista Lovelace marcados "requieren OK de Gabriel").
+- ✅ **Plan de implementación** (2026-09-13 12:30 CST): [`docs/superpowers/plans/2026-09-13-srne-inverter-integration.md`](docs/superpowers/plans/2026-09-13-srne-inverter-integration.md) — 20 tareas en 3 fases (1–6 núcleo sin HA: mapa, transporte, sondeo, CLI; 7–16 runtime HA: coordinator, entry, entidades, config flow, diagnóstico, servicios, E2E; 17–20 prueba en vivo, despliegue ⚠️ OK de Gabriel, vista Lovelace ⚠️ OK de Gabriel, docs). Paralelizables: 2∥3, 10∥11∥12, 13∥14. Formato TDD por tarea con código de arranque.
 - ⬜ Código: nada escrito todavía (`custom_components/` no existe).
 
 ## Cómo retomar (línea de reentrada)
