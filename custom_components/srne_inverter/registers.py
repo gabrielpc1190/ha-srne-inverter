@@ -265,43 +265,57 @@ FIELDS: tuple[Field, ...] = (
           device_class="voltage", category="diagnostic"),
     Field(0xE000, 4, "battery_type", "Battery Type", kind=FieldKind.ENUM,
           enum=BATTERY_TYPE, write=WriteSpec(0, 9), category="config"),
+    # E005/E006: writable maxima existed in no source in this repo (not the YAML
+    # profile, not the design spec's v1 Numbers list, not the manual's LCD
+    # parameters, and neither register appears among the successful writes in
+    # tests/fixtures/justice_inv1_settings.json). Read-only until a live
+    # safe-write test establishes the real range.
     Field(0xE000, 5, "overvoltage_threshold", "Over-voltage Threshold",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 170), category="config", precision=1),
+          category="diagnostic", precision=1),
     Field(0xE000, 6, "charge_limit_voltage", "Charge Limit Voltage",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 165), category="config", precision=1),
+          category="diagnostic", precision=1),
+    # Write ranges below are the manufacturer's per-parameter ranges from
+    # docs/2026-09-13_manual-bluesun-spi10k_tabla-de-parametros.md (SPI-10K-UP),
+    # NOT a blanket 40-64 V -- e.g. letting overdischarge_voltage reach 64 V
+    # would mean "shut inverter output down whenever the battery is below 64 V",
+    # i.e. always. raw = manual volts / 0.4.
     Field(0xE000, 7, "equalize_voltage", "Equalize Voltage", scale=0.4,
-          unit=V, device_class="voltage", write=WriteSpec(100, 160),
-          category="config", precision=1),
+          unit=V, device_class="voltage", write=WriteSpec(120, 145),
+          category="config", precision=1),  # item 17: 48-58 V
     Field(0xE000, 8, "boost_voltage", "Boost Charge Voltage", scale=0.4,
-          unit=V, device_class="voltage", write=WriteSpec(100, 160),
-          category="config", precision=1),
+          unit=V, device_class="voltage", write=WriteSpec(120, 146),
+          category="config", precision=1),  # item 09: 48-58.4 V
     Field(0xE000, 9, "float_voltage", "Float Charge Voltage", scale=0.4,
-          unit=V, device_class="voltage", write=WriteSpec(100, 160),
-          category="config", precision=1),
+          unit=V, device_class="voltage", write=WriteSpec(120, 146),
+          category="config", precision=1),  # item 11: 48-58.4 V
     Field(0xE000, 10, "recharge_voltage", "Recharge Voltage", scale=0.4,
-          unit=V, device_class="voltage", write=WriteSpec(100, 160),
-          category="config", precision=1),
+          unit=V, device_class="voltage", write=WriteSpec(110, 135),
+          category="config", precision=1),  # item 37: 44-54 V
     Field(0xE000, 11, "undervoltage_recovery", "Under-voltage Recovery",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 160), category="config", precision=1),
+          write=WriteSpec(110, 136), category="config",
+          precision=1),  # item 35: 44-54.4 V
     Field(0xE000, 12, "undervoltage_alarm", "Under-voltage Alarm", scale=0.4,
-          unit=V, device_class="voltage", write=WriteSpec(100, 160),
-          category="config", precision=1),
+          unit=V, device_class="voltage", write=WriteSpec(100, 130),
+          category="config", precision=1),  # item 14: 40-52 V
     Field(0xE000, 13, "overdischarge_voltage", "Over-discharge Voltage",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 160), category="config", precision=1),
+          write=WriteSpec(100, 120), category="config",
+          precision=1),  # item 12: 40-48 V
     Field(0xE000, 14, "discharge_limit_voltage", "Discharge Limit Voltage",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 160), category="config", precision=1),
+          write=WriteSpec(100, 130), category="config",
+          precision=1),  # item 15: 40-52 V
     Field(0xE000, 15, "discharge_stop_soc", "Discharge Stop SOC", unit=PCT,
           write=WriteSpec(0, 100), category="config"),
 
     # --- settings_high 0xE018 (offsets: address - 0xE018) -----------------
     Field(0xE018, 3, "battery_to_mains_voltage", "Battery-to-Mains Voltage",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 160), category="config", precision=1),  # E01B
+          write=WriteSpec(100, 130), category="config",
+          precision=1),  # E01B, item 04: 40-52 V
     Field(0xE018, 4, "charge_stop_current", "Charge Stop Current", scale=0.1,
           unit=A, device_class="current", write=WriteSpec(0, 100),
           category="config", precision=1),                             # E01C
@@ -315,7 +329,8 @@ FIELDS: tuple[Field, ...] = (
           write=WriteSpec(0, 100), category="config"),                 # E020
     Field(0xE018, 10, "mains_to_battery_voltage", "Mains-to-Battery Voltage",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 160), category="config", precision=1),  # E022
+          write=WriteSpec(120, 150), category="config",
+          precision=1),  # E022, item 05: 48-60 V
     Field(0xE018, 12, "li_activation_current", "Li Activation Current",
           scale=0.1, unit=A, device_class="current", category="diagnostic",
           precision=1),                                                # E024
@@ -395,13 +410,15 @@ FIELDS: tuple[Field, ...] = (
 
 DERIVED: tuple[Derived, ...] = (
     # Positive = charging (battery_current is already sign-normalised).
-    # No precision here: battery_voltage/battery_current are already rounded
-    # to 1 decimal each (Field.precision); rounding the product to precision=0
+    # precision=1, not 0: battery_voltage/battery_current are already rounded
+    # to 1 decimal each (Field.precision), so their product carries float noise
+    # (e.g. -9590.400000000001) rather than a meaningful 2nd decimal. precision=0
     # would coarsen 53.1 V x 0.9 A = 47.79 W down to 48.0 W, which falls outside
-    # the recorded-fixture test's pytest.approx(..., rel=1e-3) tolerance.
+    # the recorded-fixture test's pytest.approx(..., rel=1e-3) tolerance (+-0.048);
+    # precision=1 -> 47.8, which stays inside it.
     Derived("battery_power", "Battery Power", "multiply",
             ("battery_voltage", "battery_current"), unit=W,
-            device_class="power", state_class=MEAS),
+            device_class="power", state_class=MEAS, precision=1),
     Derived("load_power_total", "Load Power Total", "add",
             ("load_power_l1", "load_power_l2"), unit=W,
             device_class="power", state_class=MEAS, precision=0),
@@ -497,8 +514,11 @@ def decode(registers: Mapping[int, int]) -> dict[str, object]:
 def encode(field: Field, value: float | str) -> int:
     """Convert a state value back to the raw register word for a write.
 
-    Raises ValueError if the field is read-only, the enum label is unknown or
-    the resulting raw value falls outside the field's WriteSpec.
+    Raises ValueError if the field is read-only, the enum label is unknown, the
+    value is not actually reachable at this field's scale (would be silently
+    rounded to a different value), the raw value does not land on the
+    WriteSpec's step_raw grid, or the resulting raw value falls outside the
+    field's WriteSpec.
     """
     if field.write is None:
         raise ValueError(f"{field.key} is read-only on this firmware")
@@ -509,7 +529,22 @@ def encode(field: Field, value: float | str) -> int:
         if raw is None:
             raise ValueError(f"{value!r} is not a valid option for {field.key}")
     else:
-        raw = round(float(value) / field.scale)
+        raw_exact = float(value) / field.scale
+        raw = round(raw_exact)
+        # Reject values the register cannot actually represent (e.g. 57.75 V
+        # at scale=0.4 would silently become 57.6 V) instead of rounding them
+        # into a different, plausible-looking value.
+        if abs(raw_exact - raw) > 1e-6:
+            raise ValueError(
+                f"{field.key}: {value!r} is not reachable at scale "
+                f"{field.scale} (nearest raw {raw} = {raw * field.scale})"
+            )
+        step = field.write.step_raw
+        if step > 1 and (raw - field.write.min_raw) % step != 0:
+            raise ValueError(
+                f"{field.key}: raw {raw} is not on the {step}-step grid "
+                f"from {field.write.min_raw}"
+            )
 
     if not field.write.min_raw <= raw <= field.write.max_raw:
         raise ValueError(

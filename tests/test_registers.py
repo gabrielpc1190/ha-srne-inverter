@@ -1,8 +1,24 @@
 """Register map and decoder, validated against the recorded Justice capture."""
 
+import json
+
 import pytest
 
 from custom_components.srne_inverter import registers as R
+from tests.conftest import FIXTURES
+
+# Verified-present segments on firmware V8.18.006 (inclusive), from the plan's
+# device facts. A block's full extent (addr..last), not just its start address,
+# must fit entirely inside one of these -- half-in-half-out is a bug, not a
+# degraded-but-safe read.
+_VERIFIED_SEGMENTS = (
+    (0x0014, 0x001D),  # device_info
+    (0x0100, 0x010E),  # battery
+    (0x0200, 0x023F),  # faults + inverter_a + inverter_b
+    (0xE000, 0xE02F),  # settings_low + settings_high
+    (0xE200, 0xE21E),  # control_low + control_high
+    (0xF02C, 0xF043),  # meter
+)
 
 
 def test_blocks_cover_only_verified_regions():
@@ -11,11 +27,15 @@ def test_blocks_cover_only_verified_regions():
     assert addrs[0x0100] == 15
     assert addrs[0xF02C] == 24
     # Nothing may reach into regions the firmware answers IllegalDataAddress for.
+    # Checked over the block's FULL extent (addr..last), not just block.addr --
+    # Block(0x0100, 24) starts inside the verified battery segment but would end
+    # at 0x0117, inside the absent 0x0112+ region, and must still be caught.
     for block in R.BLOCKS:
         last = block.addr + block.count - 1
-        assert not (0x0112 <= block.addr <= 0x01FF)
-        assert not (0xE030 <= block.addr <= 0xE1FF)
-        assert last <= 0xE21E or block.addr >= 0xF000 or last < 0xE000
+        assert any(
+            seg_start <= block.addr and last <= seg_end
+            for seg_start, seg_end in _VERIFIED_SEGMENTS
+        ), f"{block.name} (0x{block.addr:04X}..0x{last:04X}) leaves a verified segment"
         assert block.count <= 24
 
 
@@ -94,8 +114,8 @@ def test_encode_roundtrip_number():
     field = R.field_by_key("boost_voltage")
     assert R.encode(field, 57.6) == 144
     assert field.write is not None
-    assert field.write.min_raw == 100
-    assert field.write.max_raw == 160
+    assert field.write.min_raw == 120   # manual item 09: 48-58.4 V
+    assert field.write.max_raw == 146
 
 
 def test_encode_roundtrip_enum():
@@ -110,3 +130,71 @@ def test_charge_priority_is_read_only():
     assert R.field_by_key("charge_priority").write is None
     for key in ("ac_input_range",):
         assert R.field_by_key(key).write is None
+
+
+@pytest.mark.parametrize(
+    ("key", "min_raw", "max_raw"),
+    [
+        # raw = manual volts / 0.4. See
+        # docs/2026-09-13_manual-bluesun-spi10k_tabla-de-parametros.md
+        # (SPI-10K-UP), confirmed row by row against that file.
+        ("boost_voltage", 120, 146),                 # item 09: 48-58.4 V
+        ("float_voltage", 120, 146),                 # item 11: 48-58.4 V
+        ("equalize_voltage", 120, 145),               # item 17: 48-58 V
+        ("overdischarge_voltage", 100, 120),          # item 12: 40-48 V
+        ("undervoltage_alarm", 100, 130),             # item 14: 40-52 V
+        ("discharge_limit_voltage", 100, 130),        # item 15: 40-52 V
+        ("undervoltage_recovery", 110, 136),          # item 35: 44-54.4 V
+        ("recharge_voltage", 110, 135),               # item 37: 44-54 V
+        ("battery_to_mains_voltage", 100, 130),       # item 04: 40-52 V
+        ("mains_to_battery_voltage", 120, 150),       # item 05: 48-60 V
+    ],
+)
+def test_voltage_threshold_write_ranges_match_manual(key, min_raw, max_raw):
+    """Manufacturer's per-parameter ranges, not a blanket 40-64 V.
+
+    A too-wide range here would let a Number entity (Task 11) set e.g.
+    Over-discharge Voltage to 64 V, which means "shut inverter output down
+    whenever the battery is below 64 V" -- i.e. always.
+    """
+    write = R.field_by_key(key).write
+    assert write is not None
+    assert write.min_raw == min_raw
+    assert write.max_raw == max_raw
+
+
+def test_unverified_write_ranges_are_read_only():
+    """No source in this repo backs a write range for these two registers.
+
+    Neither the YAML profile, the design spec's v1 Numbers list, the manual's
+    LCD-settable parameters, nor tests/fixtures/justice_inv1_settings.json's
+    recorded successful writes cover E005/E006. Read-only until a live
+    safe-write test proves the real range.
+    """
+    assert R.field_by_key("overvoltage_threshold").write is None
+    assert R.field_by_key("charge_limit_voltage").write is None
+
+
+def test_encode_rejects_off_step_values():
+    """A value the register cannot represent must raise, not round quietly."""
+    field = R.field_by_key("boost_voltage")  # scale=0.4, write=(120, 146)
+    with pytest.raises(ValueError):
+        R.encode(field, 39.9)   # 39.9 / 0.4 = 99.75, not an integer raw
+    with pytest.raises(ValueError):
+        R.encode(field, 57.75)  # 57.75 / 0.4 = 144.375, not an integer raw
+    assert R.encode(field, 57.6) == 144  # still exact on-grid
+
+
+def test_decode_matches_golden_snapshot(justice_registers):
+    """Every decodable field, not just the ~19 individually asserted above.
+
+    Closes a real gap: test_decode_voltage_thresholds_use_x04_scale alone
+    cannot distinguish boost_voltage/float_voltage/equalize_voltage (E008,
+    E009, E007), because all three happen to read raw 144 in this fixture --
+    swapping boost_voltage and float_voltage would still pass that test.
+    """
+    golden = json.loads(
+        (FIXTURES / "justice_inv1_decoded_golden.json").read_text()
+    )
+    values = R.decode(justice_registers)
+    assert values == golden
