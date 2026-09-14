@@ -33,10 +33,10 @@ por dos motivos verificados durante el diseño (2026-09-13):
 
 ## Instalación
 
-**Por HACS** (repositorio custom) — **pendiente**: el repo todavía es local-only (`/data/claude/ha-srne-inverter`,
-sin remoto en GitHub). Cuando pase a `gabrielpc1190/ha-srne-inverter` en GitHub privado (decisión ya tomada por
-Gabriel el 2026-09-14, todavía no ejecutada), se podrá agregar como repositorio custom en HACS
-(tipo "Integración") y instalar desde ahí.
+**Por HACS** (repositorio custom): el repo vive en GitHub privado desde el 2026-09-14
+(`git@github.com:gabrielpc1190/ha-srne-inverter.git`, rama `main`). Se agrega en HACS como repositorio custom
+(tipo "Integración", URL `https://github.com/gabrielpc1190/ha-srne-inverter`) y se instala desde ahí — pendiente
+de hacerlo así en el HA de GADI, que hoy corre la copia instalada a mano (ver método manual abajo).
 
 **Manual, por `scp`/`tar` sobre SSH** (el método usado en el despliegue real a Casa GADI): el shell Alpine del
 addon SSH de HA OS no trae `rsync`, así que se empaqueta y se copia por `tar`:
