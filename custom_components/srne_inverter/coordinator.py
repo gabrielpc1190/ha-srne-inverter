@@ -94,6 +94,16 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
         self._backoff_until = 0.0
         self._backoff_index = 0
         self._reprobe_pending = False
+        # Fix round 1 (Task 12 review, Findings 3-4): the in-flight
+        # transport.close() task a pause schedules in the background (see
+        # async_set_connection_enabled's "else" branch below) -- tracked so
+        # a following re-enable can wait for THIS specific teardown to
+        # finish before reconnecting, instead of racing it on the
+        # transport's own lock (which the transport's close-generation
+        # latch would then silently lose: it cannot tell "a stale pre-close
+        # connect queued behind me" from "a fresh post-close reconnect that
+        # merely started before I finished").
+        self._close_task: asyncio.Task[None] | None = None
 
     # ---- state ---------------------------------------------------------
 
@@ -371,26 +381,80 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
     async def async_set_connection_enabled(self, enabled: bool) -> None:
         """Pause/resume polling so external tools can own the logger.
 
-        The paused flag is set BEFORE awaiting close() (not after): close()
-        on the real transport runs entirely under the transport lock and can
-        take up to ~14 s (a 10 s connect plus two 2 s teardown windows) if it
-        races a connect() -- the switch's turn-off must not block on that
-        teardown to already report itself as disabled.
+        The paused flag is set BEFORE the transport is touched at all (not
+        after): nothing can newly connect from the moment this method
+        starts the "disable" branch, regardless of how long the actual
+        teardown below takes.
+
+        Fix round 1 (Task 12 review, Finding 3): close() on the real
+        transport runs entirely under the transport lock and can take up to
+        ~14 s (a 10 s connect plus two 2 s teardown windows) if it races a
+        connect() -- this method itself used to `await` that close()
+        directly, which meant the switch's own `async_turn_off` (an HA
+        service call under `blocking=True`) sat there for the same up to
+        ~14 s before returning, contradicting this method's own stated
+        intent ("the switch's turn-off must not block on that teardown").
+        The close is now scheduled as a tracked background task instead
+        (`self._close_task`, via the config entry's own task-tracking API so
+        it is still awaited -- not dropped -- if the entry unloads while it
+        is in flight); this method returns as soon as the flag is flipped
+        and the affected entities are marked unavailable.
+
+        Fix round 1, Finding 4: a re-enable landing while a very recent
+        disable's own close() is STILL running must not race it on the
+        transport's shared lock -- the transport's own close-generation
+        latch (see `transport.base.Transport.connect()`'s docstring) exists
+        to stop a STALE, already-queued connect() from reopening a logger
+        the user just explicitly closed, but it cannot distinguish that
+        from a fresh, legitimate reconnect that merely started while the
+        close was still tearing down: either way, the epoch changes under
+        it and it silently aborts. Measured without this guard: switch back
+        to "on", `transport.connected` stuck `False`, `connect_count`
+        never incremented, one failure booked, every data entity stuck
+        unavailable, with NOTHING logged -- recovering only at the next
+        scheduled tick, minutes later, with no indication anything was ever
+        wrong. Awaiting any pending `self._close_task` FIRST closes that
+        window: the reconnect below only ever starts after the close it
+        would otherwise have raced has genuinely finished.
         """
         if enabled == self._connection_enabled:
             return
         self._connection_enabled = enabled
         if enabled:
+            if self._close_task is not None:
+                await self._close_task
+                self._close_task = None
             self.update_interval = timedelta(seconds=self.scan_interval)
             self._backoff_until = 0.0
             self._backoff_index = 0
             await self.async_refresh()
         else:
             self.update_interval = None
-            await self.transport.close()
             self.last_update_success = False
             self.async_update_listeners()
+            self._close_task = self.config_entry.async_create_task(
+                self.hass, self.transport.close(), f"{self.name} connection close"
+            )
 
     async def async_shutdown(self) -> None:
+        """Cancel the scheduled refresh and release the transport.
+
+        Fix round 1 (Task 12 review, Findings 3-4): if a pause's own close()
+        is still running in the background (`self._close_task`) when this
+        runs, wait for it explicitly rather than relying solely on the
+        config entry's own generic "wait up to 10 s for tracked tasks"
+        unload step -- that step already covers this task incidentally
+        (`async_set_connection_enabled`'s close is scheduled via
+        `config_entry.async_create_task`, so it IS one of the tasks that
+        generic wait already waits for), but making it explicit here means
+        this method's own contract ("the transport is released by the time
+        this returns") does not depend on unload-internals reasoning.
+        `transport.close()` below still runs unconditionally afterward --
+        idempotent, and still correct for the far more common case where
+        the connection was never paused at all.
+        """
         await super().async_shutdown()
+        if self._close_task is not None:
+            await self._close_task
+            self._close_task = None
         await self.transport.close()
