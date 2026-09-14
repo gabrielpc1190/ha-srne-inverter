@@ -23,6 +23,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_COLD_INTERVAL,
@@ -35,6 +37,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SLAVE_ID,
     DEFAULT_WARM_INTERVAL,
+    DOMAIN,
     PLATFORMS,
     SOCKET_TIMEOUT,
 )
@@ -55,6 +58,33 @@ class SrneRuntimeData:
 
 
 type SrneConfigEntry = ConfigEntry[SrneRuntimeData]
+
+# Deviation from the task brief: the brief's own Step 5 code groups
+# `from .services import async_setup_services` with the other top-of-file
+# imports. `services.py` imports `.button`, and `button.py` (Task 12,
+# unchanged) does `from . import SrneConfigEntry` at ITS OWN module top
+# level -- if `.services` were imported before the `SrneConfigEntry` type
+# alias above is actually bound in this module's namespace, that resolves
+# to a circular ImportError ("cannot import name 'SrneConfigEntry' from
+# partially initialized module") the moment Python reaches this file's own
+# top. Placing the import here, after `SrneConfigEntry` is already bound,
+# is the minimal fix: `entity.py` already avoids the same hazard the other
+# way (leaving its own `entry` parameter untyped, "to avoid a circular
+# import"), so this codebase already treats the hazard as real, not
+# hypothetical.
+from .services import async_setup_services
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the domain services. Entry-agnostic: these three services
+    (read_register, write_register, reprobe) resolve their own config entry
+    from the device_id in each call, so they only need to be registered
+    once per Home Assistant instance, not once per config entry.
+    """
+    async_setup_services(hass)
+    return True
 
 
 def build_transport(entry: SrneConfigEntry) -> Transport:
