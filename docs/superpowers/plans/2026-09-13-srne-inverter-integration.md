@@ -4156,6 +4156,12 @@ class SrneConfigFlow(ConfigFlow, domain=DOMAIN):
         """Open a real connection and read two known registers."""
         transport
 
+```
+
+> ⚠️ **The code block above is TRUNCATED** — it stops mid-statement at `transport`. It is an
+> artefact of this plan being assembled from several generated chunks. The complete version of
+> `_async_validate` is the block immediately below; use that one and ignore the fragment above.
+
 ```python
     async def _async_validate(
         self, host: str, serial: int, port: int, slave_id: int
