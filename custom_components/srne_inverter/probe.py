@@ -56,14 +56,32 @@ import logging
 from dataclasses import dataclass, field as dc_field
 from enum import StrEnum
 
-from .registers import BLOCKS, Block
-from .transport.base import (
-    Transport,
-    TransportConnectionError,
-    TransportError,
-    TransportProtocolError,
-    UnsupportedRegisterError,
-)
+try:
+    from .registers import BLOCKS, Block
+    from .transport.base import (
+        Transport,
+        TransportConnectionError,
+        TransportError,
+        TransportProtocolError,
+        UnsupportedRegisterError,
+    )
+except ImportError:
+    # tools/probe.py puts custom_components/srne_inverter/ on sys.path and
+    # imports this module as a bare top-level `probe`, with no parent
+    # package -- the relative imports above have nothing to be relative TO
+    # in that shape and raise ImportError ("attempted relative import with
+    # no known parent package"). Absolute imports resolve the very same two
+    # sibling modules directly off sys.path instead. When this module is
+    # imported normally, as custom_components.srne_inverter.probe, the try
+    # branch above always succeeds and this branch never runs.
+    from registers import BLOCKS, Block  # type: ignore[import-not-found]
+    from transport.base import (  # type: ignore[import-not-found]
+        Transport,
+        TransportConnectionError,
+        TransportError,
+        TransportProtocolError,
+        UnsupportedRegisterError,
+    )
 
 _LOGGER = logging.getLogger(__name__)
 
