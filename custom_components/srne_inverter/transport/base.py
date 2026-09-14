@@ -60,7 +60,19 @@ class UnsupportedRegisterError(TransportError):
 
 
 class InvalidRegisterValueError(TransportError):
-    """The device answered IllegalDataValue: the write was refused."""
+    """The device answered IllegalDataValue: the write was refused.
+
+    A concrete, verified case a caller may hit repeatedly and mistake for a
+    bug: on Casa Justice's firmware (V8.18.006), with BMS communication
+    ACTIVE (register E215 = 1 -- the deliberate normal state there), writes
+    to E007/E008/E009 (equalize_voltage/boost_voltage/float_voltage in
+    registers.py) are refused outright with this exact error, for all
+    three, not just one of them. Confirmed live 2026-09-14. This is
+    intended "safe and loud" firmware behaviour, not an integration defect:
+    those thresholds are for a battery that does NOT communicate with the
+    inverter over BMS; on a BMS-managed unit they will raise every time.
+    See registers.py's own comment on those three fields.
+    """
 
 
 @runtime_checkable

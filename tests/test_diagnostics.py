@@ -98,23 +98,30 @@ async def test_diagnostics_contents(hass, justice_registers_synthetic_complete):
     datetime.fromisoformat(diag["generated_at"])
 
 
-async def test_diagnostics_masks_the_inverter_serial(
+async def test_diagnostics_masks_the_device_info_tail(
     hass, justice_registers_synthetic_complete
 ):
-    """Fix round 1: `values["inverter_serial"]` (the INVERTER's own serial)
-    used to ship unmasked while `entry.data["serial"]` (the LOGGER's
-    serial) was fully redacted a few keys up -- an inconsistency, not a
-    deliberate choice.
+    """Fix round 1: `values["inverter_serial"]` (at the time believed to be
+    the INVERTER's own serial) used to ship unmasked while
+    `entry.data["serial"]` (the LOGGER's serial) was fully redacted a few
+    keys up -- an inconsistency, not a deliberate choice.
+
+    2026-09-14 correction: that field is not actually a serial (live
+    evidence -- see registers.py's own comment on 0x0018-0x001B) and was
+    renamed `device_info_tail` / `FieldKind.HEX_WORDS`. The masking
+    behaviour this test pins is UNCHANGED and still applies to it, as a
+    defensive default for "an unverified multi-word diagnostic value", not
+    because it turned out to be identifying after all.
     """
     entry = await setup_entry(hass, FakeTransport(justice_registers_synthetic_complete))
     diag = await async_get_config_entry_diagnostics(hass, entry)
 
-    real_serial = R.decode(justice_registers_synthetic_complete)["inverter_serial"]
-    masked = diag["values"]["inverter_serial"]
-    assert masked != real_serial
-    assert masked.endswith(real_serial[-4:])
-    assert set(masked[: -len(real_serial[-4:])]) == {"*"}
-    assert real_serial not in json.dumps(diag)
+    real_value = R.decode(justice_registers_synthetic_complete)["device_info_tail"]
+    masked = diag["values"]["device_info_tail"]
+    assert masked != real_value
+    assert masked.endswith(real_value[-4:])
+    assert set(masked[: -len(real_value[-4:])]) == {"*"}
+    assert real_value not in json.dumps(diag)
 
 
 async def test_diagnostics_lists_unsupported_blocks(

@@ -195,6 +195,63 @@ def test_encode_rejects_off_step_values():
     assert R.encode(field, 57.6) == 144  # still exact on-grid
 
 
+def test_grid_current_l2_reads_from_0x0238_not_0x022b(
+    probe_inv1_registers, probe_inv2_registers
+):
+    """Fix (live run, Casa Justice, 2026-09-14): grid_current_l2 used to map
+    to 0x022B (design decision 1, locked, chosen from the YAML profile over
+    the older justice_inverters_read.py's 0x0238). Measured on BOTH units
+    with machine_state=2 ("AC bypass", so the grid feeds the load): 0x022B
+    read 0.0 A on both while the load visibly drew current; 0x0238 tracked
+    it, exactly as grid current should in bypass. The old script was right.
+    See registers.py's own comment on the 0x0223 block for the full trace.
+    """
+    field = R.field_by_key("grid_current_l2")
+    assert field.address == 0x0238
+
+    for registers, expected_raw in (
+        (probe_inv1_registers, 46),   # docs/evidence/2026-09-14_probe-inv1.json
+        (probe_inv2_registers, 185),  # docs/evidence/2026-09-14_probe-inv2.json
+    ):
+        assert registers[0x0238] == expected_raw
+        assert registers[0x022B] == 0  # the old, wrong mapping: a confident 0.0 A
+        values = R.decode(registers)
+        assert values["grid_current_l2"] == pytest.approx(expected_raw * 0.1)
+
+    # 0x022B is deliberately unmapped -- nothing in FIELDS may point at it.
+    assert all(f.address != 0x022B for f in R.FIELDS)
+
+
+def test_device_info_tail_is_not_claimed_as_a_serial(
+    probe_inv1_registers, probe_inv2_registers
+):
+    """Fix (live run, Casa Justice, 2026-09-14): 0x0018-0x001B used to be
+    decoded as `inverter_serial`, marked "unverified" (design decision 5).
+    Live: inv1 (slave 1) reads [0, 0, 1, 45], inv2 (slave 2) reads
+    [0, 0, 2, 45] -- the third word is the slave id / RS485 address, not a
+    serial. The field is renamed `device_info_tail` (FieldKind.HEX_WORDS,
+    not SERIAL, which no longer exists) so it stops claiming more than is
+    known.
+    """
+    field = R.field_by_key("device_info_tail")
+    assert field.kind is R.FieldKind.HEX_WORDS
+    assert field.address == 0x0018
+
+    for registers, slave_id in (
+        (probe_inv1_registers, 1),
+        (probe_inv2_registers, 2),
+    ):
+        assert [registers[0x0018 + i] for i in range(4)] == [0, 0, slave_id, 45]
+        # The third word matches this unit's own separately-decoded
+        # rs485_address (0xE200) exactly -- independent confirmation it is
+        # the slave id, not part of some serial.
+        assert R.decode(registers)["rs485_address"] == slave_id
+
+    assert "inverter_serial" not in {f.key for f in R.FIELDS}
+    assert R.FieldKind("hex_words") is R.FieldKind.HEX_WORDS
+    assert not hasattr(R.FieldKind, "SERIAL")
+
+
 def test_decode_matches_golden_snapshot(justice_registers):
     """Every decodable field, not just the ~19 individually asserted above.
 
@@ -227,15 +284,49 @@ def test_decode_distinguishes_float_from_boost_and_equalize(
     float_voltage is not wired to the same address as boost_voltage or
     equalize_voltage.
 
-    This closes ONLY the float-vs-{boost,equalize} half of the hole. It does
-    NOT close a boost_voltage/equalize_voltage (E008/E007) swap against each
-    other: E007 and E008 are identical in every capture recorded in this repo
-    (144/144 in `before`, 142/142 in `after_bms_off`), so separating those two
-    is genuinely impossible with the evidence on hand -- it needs a new
-    capture where they differ. Do not delete this test as "redundant with the
-    golden snapshot"; it is the only test that can see this at all.
+    This closes the float-vs-{boost,equalize} half of the hole. It does NOT
+    close a boost_voltage/equalize_voltage (E008/E007) swap against each
+    other: E007 and E008 are identical in every capture THIS fixture has
+    (144/144 in `before`, 142/142 in `after_bms_off`). That remaining half
+    was genuinely unfalsifiable with the evidence on hand at the time this
+    test was written -- it needed a new capture where they differ, which did
+    not exist yet. It exists now: test_decode_distinguishes_boost_from_equalize
+    below closes it, using a 2026-09-14 live capture obtained specifically
+    for that purpose. Do not delete THIS test as "redundant with the golden
+    snapshot"; it is still the only test that can see the float-vs-the-other-
+    two half at all.
     """
     values = R.decode(justice_settings_after_bms_off)
     assert values["float_voltage"] == pytest.approx(140 * 0.4)      # 56.0 V
     assert values["boost_voltage"] == pytest.approx(142 * 0.4)      # 56.8 V
     assert values["equalize_voltage"] == pytest.approx(142 * 0.4)   # 56.8 V
+
+
+def test_decode_distinguishes_boost_from_equalize(justice_equalize_distinct):
+    """Closes the boost_voltage/equalize_voltage (E008/E007) half of the
+    ambiguity that test_decode_distinguishes_float_from_boost_and_equalize
+    above explicitly could NOT close: every capture in this repo until now
+    had E007 and E008 read the identical raw value (144/144 with the BMS
+    active, 142/142 in `after_bms_off`), so a Field swap between those two
+    specifically could not be detected by decoding alone -- boost_voltage
+    and equalize_voltage could have had their addresses (E008/E007) swapped
+    and every existing test, including the golden snapshot, would still
+    pass.
+
+    docs/evidence/2026-09-14_inv1-equalize-distinct.json is the first
+    capture where they differ, obtained live at Casa Justice inverter 1:
+    BMS communication was briefly disabled (E215 -> 0, the gate that
+    otherwise pins E007-E009 to one BMS-dictated value -- see registers.py's
+    own equalize_voltage/boost_voltage/float_voltage comment), E007 was
+    written to a value distinct from E008/E009, then both E007 and E215
+    were restored immediately afterward (progress.md's TASK 17 write-phase
+    TRIAL D; all 48 E000-E02F registers confirmed unchanged after restore).
+    Raw: E007=142 (equalize), E008=144 (boost), E009=144 (float), scale 0.4
+    -> 56.8 V / 57.6 V / 57.6 V. With THIS half now closed too, an
+    equalize_voltage/boost_voltage address swap is no longer unfalsifiable.
+    """
+    values = R.decode(justice_equalize_distinct)
+    assert values["equalize_voltage"] == pytest.approx(142 * 0.4)  # 56.8 V
+    assert values["boost_voltage"] == pytest.approx(144 * 0.4)     # 57.6 V
+    assert values["float_voltage"] == pytest.approx(144 * 0.4)     # 57.6 V
+    assert values["equalize_voltage"] != values["boost_voltage"]

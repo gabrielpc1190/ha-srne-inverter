@@ -42,20 +42,29 @@ DEFAULT_UNSUPPORTED: tuple[range, ...] = (
     # After "control_high" (0xE200-0xE21E); "meter" (0xF02C) is next.
     # 0xE21F itself answered IllegalDataAddress on the real logger.
     range(0xE21F, 0xF02C),
-    # Inside the settings_high/config area. Starts at 0xE03A, NOT 0xE030:
-    # 0xE039 is deliberately excluded from this range because it is
+    # 0xE03A-0xE0FF used to be declared absent here too, extending the
+    # settings_high/config gap. CORRECTED 2026-09-14: that was never
+    # verified, only assumed from a range boundary drawn one block too
+    # wide -- live reads at Casa Justice inverter 1 show 0xE03A returns
+    # [0, 0] (present, just zero) and 0xE100/0xE116/0xE121 all answer
+    # structured, non-padding data ([0,10,9,65523], [45,0,100,0],
+    # [200,10,3750,5]) -- see docs/evidence/2026-09-14_probe-inv1.json.
+    # The entire 0xE03A-0xE12F span is PRESENT on this firmware, confirming
+    # the note two paragraphs below about tests/fixtures/
+    # justice_inv1_blocks.json's own "config_pre"/"config"/"config_post"
+    # capture blocks, which this DEFAULT_UNSUPPORTED range used to
+    # contradict for its 0xE03A-0xE0FF slice. registers.py does not (yet)
+    # model 0xE03A-0xE12F as one of its 10 BLOCKS, so an address in that
+    # span that is not in a test's own `registers` dict correctly falls
+    # through to the fixture-gap LookupError below (UNKNOWN, not absent --
+    # see the module docstring), rather than being declared unsupported
+    # here "to be safe". 0xE039 (just below this span) stays excluded from
+    # every range here regardless, for the reason given next: it is
     # write-rejected (see WRITE_REJECTED below), which is only a coherent
     # firmware answer for an address that EXISTS -- it must never also be
-    # claimed absent here, or the fake could answer IllegalDataAddress to a
-    # read and IllegalDataValue to a write at the same address, which no
-    # real Modbus device can do.
-    # Bounded at 0xE100, NOT extended to 0xE200: tests/fixtures/
-    # justice_inv1_blocks.json recorded real, non-zero values across
-    # 0xE100-0xE109, 0xE116-0xE120 and 0xE121-0xE12F (its "config_pre" /
-    # "config" / "config_post" capture blocks) -- direct evidence against
-    # marking that span absent, even though registers.py does not (yet)
-    # model it as one of its 10 BLOCKS.
-    range(0xE03A, 0xE100),
+    # claimed absent, or the fake could answer IllegalDataAddress to a read
+    # and IllegalDataValue to a write at the same address, which no real
+    # Modbus device can do.
 )
 
 # Writes the firmware answers IllegalDataValue to (verified at Casa Justice).

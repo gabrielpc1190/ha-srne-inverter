@@ -18,6 +18,13 @@ from custom_components.srne_inverter.registers import BLOCKS
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# Live-hardware evidence from the 2026-09-14 Task 17 run against both real
+# Casa Justice units (docs/evidence/*.json) -- separate from tests/fixtures/
+# (Tasks 1-16's captures): these are newer, narrower captures made to settle
+# specific open register questions, not full-suite golden data. Never edited
+# to plug a test hole, same discipline as tests/fixtures/.
+EVIDENCE = Path(__file__).parent.parent / "docs" / "evidence"
+
 # Obviously-fake filler for load_justice_registers_synthetic_complete(). Not a
 # plausible raw register value for any real field here -- chosen so a
 # synthetic address is recognizable at a glance if it ever leaks into a log
@@ -136,3 +143,64 @@ def justice_settings_after_bms_off_fixture() -> dict[int, int]:
     """Recorded Justice inverter 1 settings registers, captured after the BMS
     was disconnected -- see load_justice_settings_after_bms_off()'s docstring."""
     return load_justice_settings_after_bms_off()
+
+
+def _load_probe_registers(filename: str) -> dict[int, int]:
+    """Flatten a tools/probe.py --json capture's `registers` map ({"0xNNNN":
+    raw_value, ...}) into {address: raw_value}. Used for the 2026-09-14
+    Task 17 live probes of both Casa Justice units (docs/evidence/
+    2026-09-14_probe-inv1.json / _probe-inv2.json), each a full 10/10-block
+    snapshot -- unlike tests/fixtures/justice_inv1_blocks.json, these cover
+    every address inside registers.BLOCKS with no internal gaps.
+    """
+    doc = json.loads((EVIDENCE / filename).read_text())
+    return {int(key, 16): value for key, value in doc["registers"].items()}
+
+
+@pytest.fixture(name="probe_inv1_registers")
+def probe_inv1_registers_fixture() -> dict[int, int]:
+    """Live 2026-09-14 full-probe capture of Casa Justice inverter 1
+    (192.168.188.240, serial 3548208972, slave 1) -- see
+    docs/evidence/2026-09-14_probe-inv1.json."""
+    return _load_probe_registers("2026-09-14_probe-inv1.json")
+
+
+@pytest.fixture(name="probe_inv2_registers")
+def probe_inv2_registers_fixture() -> dict[int, int]:
+    """Live 2026-09-14 full-probe capture of Casa Justice inverter 2
+    (192.168.188.242, serial 3548738877, slave 2) -- see
+    docs/evidence/2026-09-14_probe-inv2.json."""
+    return _load_probe_registers("2026-09-14_probe-inv2.json")
+
+
+def load_justice_equalize_distinct() -> dict[int, int]:
+    """Flatten docs/evidence/2026-09-14_inv1-equalize-distinct.json into
+    {address: raw_value} for E007/E008/E009 only.
+
+    The first (and only) real capture in this repo where equalize_voltage
+    (E007), boost_voltage (E008) and float_voltage (E009) read three
+    DIFFERENT raw values (142/144/144) -- obtained live at Casa Justice
+    inverter 1 by briefly disabling BMS communication (E215 -> 0, the gate
+    that otherwise pins all three to one BMS-dictated value) and writing
+    E007 to a value distinct from E008/E009, then restoring both E007 and
+    E215 immediately afterward (progress.md's TASK 17 write-phase TRIAL D;
+    all 48 E000-E02F registers confirmed unchanged after restore). Every
+    earlier capture in this repo (`before`/`after_bms_off` in
+    justice_inv1_settings.json) has E007 and E008 reading the SAME raw
+    value, which is exactly why this evidence exists: it is the only data
+    that can catch an E007/E008 (equalize/boost) address swap. Never edited
+    to plug a test hole -- read as-is from the recorded file.
+    """
+    doc = json.loads((EVIDENCE / "2026-09-14_inv1-equalize-distinct.json").read_text())
+    return {
+        0xE007: doc["E007_equalize"],
+        0xE008: doc["E008_boost"],
+        0xE009: doc["E009_float"],
+    }
+
+
+@pytest.fixture(name="justice_equalize_distinct")
+def justice_equalize_distinct_fixture() -> dict[int, int]:
+    """E007/E008/E009 from the one real capture where they differ -- see
+    load_justice_equalize_distinct()'s docstring."""
+    return load_justice_equalize_distinct()

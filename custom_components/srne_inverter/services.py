@@ -75,10 +75,15 @@ ATTR_VALUE = "value"
 # base SRNE hardware/firmware family per this repo's own CLAUDE.md -- if a
 # future unit turns out to differ, the write still fails safely (this is a
 # fail-FAST guard, not the only guard; see the module docstring's net 2).
+#
+# 0xE03A-0xE0FF used to be included here too. CORRECTED 2026-09-14: live
+# reads at Casa Justice show that span is PRESENT (0xE03A = [0, 0],
+# 0xE100/0xE116/0xE121 all answer structured data) -- see
+# tests/fake_transport.py's DEFAULT_UNSUPPORTED for the full evidence, which
+# this tuple must keep matching exactly (enforced by the test named above).
 KNOWN_ABSENT_ON_THIS_FIRMWARE: tuple[range, ...] = (
     range(0x0112, 0x0200),
     range(0xE21F, 0xF02C),
-    range(0xE03A, 0xE100),
 )
 
 # Writes the firmware answers IllegalDataValue to, verified at Casa Justice,

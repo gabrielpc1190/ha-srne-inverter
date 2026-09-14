@@ -350,19 +350,19 @@ async def test_raw_value_exposes_every_word_of_a_multi_word_field(
 ):
     """Fix round 1, Finding 5 (Minor): `raw_value` used to read only a
     multi-word field's FIRST register. Pins that a 4-word field
-    (inverter_serial) and a 2-word field (load_energy_total) both return
-    every one of their words, in address order -- not a single truncated
-    int -- while a one-word field's `raw_value` is still a plain int,
-    unchanged."""
+    (device_info_tail, renamed 2026-09-14 from inverter_serial -- see
+    registers.py) and a 2-word field (load_energy_total) both return every
+    one of their words, in address order -- not a single truncated int --
+    while a one-word field's `raw_value` is still a plain int, unchanged."""
     transport = FakeTransport(justice_registers_synthetic_complete)
     entry = await setup_entry(hass, transport)
     coordinator = entry.runtime_data.coordinator
 
-    serial_field = R.field_by_key("inverter_serial")
-    serial_entity = SrneFieldEntity(coordinator, entry, serial_field)
-    raw = serial_entity.raw_value
+    tail_field = R.field_by_key("device_info_tail")
+    tail_entity = SrneFieldEntity(coordinator, entry, tail_field)
+    raw = tail_entity.raw_value
     assert raw == [
-        coordinator.data.registers.get(serial_field.address + i) for i in range(4)
+        coordinator.data.registers.get(tail_field.address + i) for i in range(4)
     ]
 
     energy_field = R.field_by_key("load_energy_total")

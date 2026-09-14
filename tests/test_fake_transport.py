@@ -436,6 +436,63 @@ def test_default_unsupported_never_covers_a_declared_present_block():
     )
 
 
+def test_default_unsupported_no_longer_covers_0xe03a_span():
+    """Fix (live run, Casa Justice, 2026-09-14): 0xE03A-0xE0FF used to be
+    declared absent here, extending the settings_high/config gap one span
+    too far past 0xE039 (the last address registers.py actually models
+    there). That was never verified -- live reads proved the whole
+    0xE03A-0xE12F span is PRESENT (0xE03A = [0, 0]; 0xE100/0xE116/0xE121
+    answer structured, non-padding data: [0,10,9,65523], [45,0,100,0],
+    [200,10,3750,5] -- see progress.md's TASK 17 FINDING 3; not saved to a
+    docs/evidence/*.json file, since the two full probe captures only cover
+    registers.BLOCKS' 10 declared blocks and this span is not one of them
+    yet). An address in 0xE03A-0xE0FF must therefore never be in
+    DEFAULT_UNSUPPORTED at all."""
+    span_addresses = {addr for addr in range(0xE03A, 0xE100)}
+    unsupported_addresses = {addr for span in DEFAULT_UNSUPPORTED for addr in span}
+    assert span_addresses.isdisjoint(unsupported_addresses)
+
+
+async def test_0xe03a_span_reads_as_fixture_gap_not_absent(justice_registers):
+    """The property test above pins DEFAULT_UNSUPPORTED's content; this pins
+    the behaviour it produces. 0xE050 is inside the span the old
+    DEFAULT_UNSUPPORTED wrongly declared absent, and is not itself modelled
+    by any registers.py Field or covered by any recorded fixture. With the
+    corrected range, reading it must raise LookupError (an honest "we don't
+    know" fixture gap, per this module's own docstring), never
+    UnsupportedRegisterError (a false claim the device lacks it) -- which is
+    exactly what the old, wider DEFAULT_UNSUPPORTED range would have forced
+    regardless of the fixture's own contents."""
+    transport = FakeTransport(justice_registers)
+    await transport.connect()
+    assert 0xE050 not in justice_registers  # sanity: genuinely untested here
+    with pytest.raises(LookupError) as exc_info:
+        await transport.read_holding(0xE050, 1)
+    assert not isinstance(exc_info.value, UnsupportedRegisterError)
+
+
+async def test_0xe03a_span_reads_the_recorded_live_values_when_seeded():
+    """Same span, seeded with the exact raw values recorded live at Casa
+    Justice inverter 1, 2026-09-14 (progress.md's TASK 17 FINDING 3): reads
+    must succeed and return them verbatim -- this is the concrete property
+    the old, wrong DEFAULT_UNSUPPORTED range broke (it raised
+    UnsupportedRegisterError here regardless of what `registers` contains,
+    since the unsupported check runs before the registers dict is ever
+    consulted)."""
+    registers = {
+        0xE03A: 0, 0xE03B: 0,
+        0xE100: 0, 0xE101: 10, 0xE102: 9, 0xE103: 65523,
+        0xE116: 45, 0xE117: 0, 0xE118: 100, 0xE119: 0,
+        0xE121: 200, 0xE122: 10, 0xE123: 3750, 0xE124: 5,
+    }
+    transport = FakeTransport(registers)
+    await transport.connect()
+    assert await transport.read_holding(0xE03A, 2) == [0, 0]
+    assert await transport.read_holding(0xE100, 4) == [0, 10, 9, 65523]
+    assert await transport.read_holding(0xE116, 4) == [45, 0, 100, 0]
+    assert await transport.read_holding(0xE121, 4) == [200, 10, 3750, 5]
+
+
 # --- synthetic-complete fixture ---------------------------------------------
 
 

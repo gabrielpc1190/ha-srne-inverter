@@ -31,7 +31,13 @@ class FieldKind(StrEnum):
     ENUM = "enum"        # raw -> EnumMap label
     HEX = "hex"          # raw -> "0xNNNN" (fault words)
     VERSION = "version"  # raw 818 -> "V8.18"
-    SERIAL = "serial"    # N words -> "AABBCCDD"
+    # N words -> "AABBCCDD" (concatenated hex). Purely mechanical -- unlike
+    # VERSION/ENUM this implies nothing about what the words MEAN. Used to be
+    # named SERIAL after its one user (0x0018-0x001B), which live evidence
+    # showed is not actually a serial -- see that field's own comment below.
+    # Renamed rather than kept as a misleading name on a mechanism that never
+    # claimed identity in the first place.
+    HEX_WORDS = "hex_words"
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,8 +247,19 @@ FIELDS: tuple[Field, ...] = (
     # --- inverter_b 0x0223 (offsets: address - 0x0223) --------------------
     Field(0x0223, 7, "grid_voltage_l2", "Grid Voltage L2", scale=0.1, unit=V,
           device_class="voltage", state_class=MEAS, precision=1),   # 0x022A
-    Field(0x0223, 8, "grid_current_l2", "Grid Current L2", scale=0.1, unit=A,
-          device_class="current", state_class=MEAS, precision=1),   # 0x022B
+    # 0x022B is deliberately UNMAPPED -- it used to be grid_current_l2
+    # (design decision 1, locked: chose 0x022B from the YAML profile over
+    # the older justice_inverters_read.py's 0x0238). Live at Casa Justice
+    # (2026-09-14, both units, machine_state=2 "AC bypass" so the grid
+    # feeds the load): 0x022B read 0.0 A on BOTH units while the load drew
+    # 15.5 A (inv1) / 16.9 A (inv2); 0x0238 read 15.6 A / 17.3 A, tracking
+    # load current slightly high, exactly as grid current should in
+    # bypass. A second, lower-load sample agreed (load 4.6 A, 0x0238 =
+    # 4.6 A, 0x022B = 0) -- see docs/evidence/2026-09-14_probe-inv1.json /
+    # _probe-inv2.json. The old script was right; the YAML profile was
+    # wrong. grid_current_l2 moved to 0x0238 below. 0x022B's own meaning is
+    # NOT known and is not guessed here -- do not remap another field onto
+    # it without new evidence.
     Field(0x0223, 9, "output_voltage_l2", "Output Voltage L2", scale=0.1,
           unit=V, device_class="voltage", state_class=MEAS, precision=1),
     Field(0x0223, 11, "output_current_l2", "Output Current L2", scale=0.1,
@@ -254,6 +271,8 @@ FIELDS: tuple[Field, ...] = (
           device_class="power", state_class=MEAS),                  # 0x0232
     Field(0x0223, 17, "load_apparent_power_l2", "Load Apparent Power L2",
           unit=VA, device_class="apparent_power", state_class=MEAS),  # 0x0234
+    Field(0x0223, 21, "grid_current_l2", "Grid Current L2", scale=0.1, unit=A,
+          device_class="current", state_class=MEAS, precision=1),   # 0x0238
 
     # --- settings_low 0xE000 ---------------------------------------------
     Field(0xE000, 1, "pv_charge_current_max", "PV Charge Current Max",
@@ -281,6 +300,23 @@ FIELDS: tuple[Field, ...] = (
     # NOT a blanket 40-64 V -- e.g. letting overdischarge_voltage reach 64 V
     # would mean "shut inverter output down whenever the battery is below 64 V",
     # i.e. always. raw = manual volts / 0.4.
+    #
+    # equalize_voltage/boost_voltage/float_voltage (E007/E008/E009) below:
+    # confirmed live at Casa Justice (2026-09-14) that with BMS communication
+    # ACTIVE (E215 = 1 -- the deliberate normal state here, Gabriel prefers
+    # the battery to dictate these values), the firmware REFUSES writes to
+    # ALL THREE outright with Modbus IllegalDataValue (our transport raises
+    # InvalidRegisterValueError -- see transport/base.py's
+    # InvalidRegisterValueError docstring). That is intended "safe and
+    # loud" behaviour, not a bug: these writable thresholds exist for a
+    # battery that does NOT communicate with the inverter (BMS comm off),
+    # which this integration must also support -- Gabriel confirmed both
+    # cases matter. On a BMS-managed unit (the common case at Casa Justice
+    # today) these three Number entities will raise on every write attempt;
+    # that is correct, not a fault to chase. With BMS comm briefly disabled
+    # for verification, a write DID succeed immediately (see
+    # docs/evidence/2026-09-14_inv1-equalize-distinct.json and
+    # tests/test_registers.py's test_decode_distinguishes_boost_from_equalize).
     Field(0xE000, 7, "equalize_voltage", "Equalize Voltage", scale=0.4,
           unit=V, device_class="voltage", write=WriteSpec(120, 145),
           category="config", precision=1),  # item 17: 48-58 V
@@ -389,9 +425,21 @@ FIELDS: tuple[Field, ...] = (
           kind=FieldKind.VERSION, category="diagnostic"),
     Field(0x0014, 3, "hardware_version", "Hardware Version",
           kind=FieldKind.VERSION, category="diagnostic"),
-    # 0x0018-0x001B: meaning unverified, exposed as a diagnostic hex string.
-    Field(0x0014, 4, "inverter_serial", "Inverter Serial",
-          kind=FieldKind.SERIAL, words=4, category="diagnostic"),
+    # 0x0018-0x001B: NOT the inverter's serial (design decision 5 shipped
+    # this as "inverter_serial", explicitly marked unverified -- it was a
+    # guess). Live at Casa Justice (2026-09-14): inv1 (slave 1) reads
+    # [0, 0, 1, 45]; inv2 (slave 2) reads [0, 0, 2, 45]. The third word
+    # (0x001A) is 1 / 2 -- the slave id / RS485 address, matching each
+    # unit's own rs485_address field (0xE200, decoded separately below)
+    # exactly. The fourth word (45) is identical on both units; its meaning
+    # is not known and is not guessed here. Nothing downstream depends on
+    # this being a serial: entity.py's device identity (unique_id,
+    # DeviceInfo.serial_number) comes from CONF_SERIAL on the config entry
+    # -- the Solarman LOGGER's serial, entered at setup / read from the
+    # logger's own web UI -- never from this register (confirmed by reading
+    # entity.py: `self._serial = str(entry.data[CONF_SERIAL])`).
+    Field(0x0014, 4, "device_info_tail", "Device Info Tail (unverified)",
+          kind=FieldKind.HEX_WORDS, words=4, category="diagnostic"),
     Field(0x0014, 8, "bms_version_1", "BMS Version 1", scale=0.01,
           category="diagnostic", precision=2),
     Field(0x0014, 9, "bms_version_2", "BMS Version 2", scale=0.01,
@@ -471,7 +519,7 @@ def _decode_field(field: Field, registers: Mapping[int, int]) -> object | None:
         return f"0x{words[0]:04X}"
     if field.kind is FieldKind.VERSION:
         return f"V{words[0] // 100}.{words[0] % 100:02d}"
-    if field.kind is FieldKind.SERIAL:
+    if field.kind is FieldKind.HEX_WORDS:
         return "".join(f"{word:04X}" for word in words)
     if field.kind is FieldKind.ENUM:
         assert field.enum is not None

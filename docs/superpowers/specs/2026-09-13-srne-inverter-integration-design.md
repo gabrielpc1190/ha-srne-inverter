@@ -36,8 +36,13 @@ agregados por banco/sitio (se hacen con templates de HA), HACS oficial.
   El de Justice inv1 = `3548208972` (`192.168.188.240`, esclavo 1), inv2 = `3548738877` (`.242`, esclavo 2).
 - Esclavo Modbus en paralelo: host = 1, segundo = 2 (el logger del inv2 responde `Empty`/`AcknowledgeError` con esclavo 1).
 - Bloques que responden en `V8.18.006`: `0x0014` (10), `0x0100` (15), `0x0200–0x023F`, `0xE000–0xE02F`,
-  `0xE200–0xE21E`, `0xF02C–0xF043`. **No existen**: `0x0112+` (bloque BMS), `0xE03A+`, `0xE21F+`.
+  `0xE200–0xE21E`, `0xF02C–0xF043`. **No existen**: `0x0112+` (bloque BMS), `0xE21F+`.
   Escrituras rechazadas por el inversor (IllegalDataValue): `E20F`, `E21D`, `E039`, `E20B`; `E21B` acepta 0–15.
+  🔴 **Corrección 2026-09-14** (prueba en vivo, Task 17): `0xE03A+` marcado "no existe" arriba era **incorrecto**
+  — lectura en vivo de `0xE03A` devuelve `[0, 0]` (presente, en cero) y `0xE100`/`0xE116`/`0xE121` devuelven datos
+  estructurados no-cero (`[0,10,9,65523]`, `[45,0,100,0]`, `[200,10,3750,5]`). Todo el rango `0xE03A–0xE12F` está
+  **PRESENTE**; `0x0112+` y `0xE21F+` sí se confirmaron ausentes (IllegalDataAddress real). Ver
+  `tests/fake_transport.py`'s `DEFAULT_UNSUPPORTED` y `services.py`'s `KNOWN_ABSENT_ON_THIS_FIRMWARE`, corregidos.
 - Semántica confirmada en sitio: `0x0102` corriente de batería **negativa = cargando** (se normaliza a
   positivo = carga); `0x0103` temperatura de batería devuelve 0 con BMS en PYL; `0x010B` estado de carga
   (1 = quick/CC, 2 = CV, 4 = float, 6 = activación Li, 8 = full); `0x0210` estado (2 = AC bypass, 3 = inversor);
@@ -45,7 +50,18 @@ agregados por banco/sitio (se hacen con templates de HA), HACS oficial.
   "equivalente 12 V" (`raw/10×4` V); `E204` prioridad de salida 0 SOL / 1 UTI / 2 SBU / **3 SUB** (con UTI el
   cargador de red queda en ~1 A — causa del caso de Justice); `E215` BMS 0 SLA / 1 RS485 / 2 CAN; `E21B`
   protocolo (8 = PYL); `E004` tipo (0 USER … 6 L16); `E201` paralelo; `E21E` fase.
-  Con BMS activo, `E007–E009` muestran el valor que dicta el BMS y `E009` (float) es de solo lectura.
+  Con BMS activo (`E215 = 1`, el estado normal deliberado en Justice), el firmware **rechaza** escrituras a
+  `E007`/`E008`/`E009` (equalize/boost/float) los TRES, no solo float como se pensaba antes de la prueba en
+  vivo — `IllegalDataValue`, confirmado 2026-09-14 (ver `transport/base.py`'s `InvalidRegisterValueError`).
+  🔴 **Corrección 2026-09-14**: `0x0018–0x001B`, mapeado como "SN inversor" en la arquitectura (§4) y como
+  `inverter_serial` en `registers.py`, **no es un serial**. En vivo: inv1 `[0, 0, 1, 45]`, inv2 `[0, 0, 2, 45]`
+  — la tercera palabra es el esclavo Modbus (1/2), coincide exactamente con `rs485_address` (`0xE200`). Renombrado
+  a `device_info_tail` (`FieldKind.HEX_WORDS`, ya no `SERIAL`). El SN real del inversor sigue sin conocerse; el
+  identificador de dispositivo en HA usa el SN del **logger** (`CONF_SERIAL`, de la config entry), no este registro.
+  🔴 **Corrección 2026-09-14**: `grid_current_l2` mapeado a `0x022B` (decisión de diseño 1) estaba **mal** — en
+  bypass CA (machine_state=2) leía 0,0 A en ambas unidades mientras la carga real era 15,5/16,9 A; `0x0238` sí
+  seguía la corriente de carga (15,6/17,3 A), como corresponde a corriente de red en bypass. Movido a `0x0238`;
+  `0x022B` queda sin mapear (significado desconocido).
 - Lecturas: ~0,3 s por bloque por logger; usar pausas cortas entre bloques y un solo lock por conexión.
 
 ## 4. Arquitectura
@@ -66,7 +82,8 @@ custom_components/srne_inverter/
   config_flow.py         UI: nombre, host, puerto, serial (opcional: "leer del logger" vía status.html),
                          esclavo, intervalo; validación = conectar + leer 0x0100/0x0014; unique_id = serial.
                          Options flow: intervalos, "conexión habilitada".
-  entity.py              base: DeviceInfo (serial logger + SN inversor 0x0018, fw 0x0014), disponibilidad
+  entity.py              base: DeviceInfo (serial LOGGER (config entry) + 0x0018 "device_info_tail",
+                         NO es SN del inversor -- corrección 2026-09-14, ver §3; fw 0x0014), disponibilidad
   sensor.py / select.py / number.py / switch.py / button.py / binary_sensor.py / diagnostics.py
   services.yaml + services: read_register, write_register (raw, con readback), reprobe
   translations/en.json, es.json
