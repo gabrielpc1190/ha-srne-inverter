@@ -137,11 +137,19 @@ def test_charge_priority_is_read_only():
     [
         # raw = manual volts / 0.4. See
         # docs/2026-09-13_manual-bluesun-spi10k_tabla-de-parametros.md
-        # (SPI-10K-UP), confirmed row by row against that file.
+        # (SPI-10K-UP), confirmed row by row against that file -- except
+        # overdischarge_voltage (see its own comment below and the matching
+        # one in registers.py): its max is deliberately widened past that
+        # manual's printed row.
         ("boost_voltage", 120, 146),                 # item 09: 48-58.4 V
         ("float_voltage", 120, 146),                 # item 11: 48-58.4 V
         ("equalize_voltage", 120, 145),               # item 17: 48-58 V
-        ("overdischarge_voltage", 100, 120),          # item 12: 40-48 V
+        # item 12 prints 40-48 V (raw 100-120), but Casa Justice inv1 has
+        # this register recorded at raw 122 (48.8 V) in
+        # tests/fixtures/justice_inv1_settings.json, set deliberately to
+        # follow the battery manual's 49 V shutdown voltage instead -- see
+        # registers.py's overdischarge_voltage comment for the full chain.
+        ("overdischarge_voltage", 100, 122),          # item 12: 40-48 V manual, widened to 48.8 V
         ("undervoltage_alarm", 100, 130),             # item 14: 40-52 V
         ("discharge_limit_voltage", 100, 130),        # item 15: 40-52 V
         ("undervoltage_recovery", 110, 136),          # item 35: 44-54.4 V
@@ -155,7 +163,9 @@ def test_voltage_threshold_write_ranges_match_manual(key, min_raw, max_raw):
 
     A too-wide range here would let a Number entity (Task 11) set e.g.
     Over-discharge Voltage to 64 V, which means "shut inverter output down
-    whenever the battery is below 64 V" -- i.e. always.
+    whenever the battery is below 64 V" -- i.e. always. (overdischarge_voltage's
+    own max is a deliberate, narrow exception to "matches the manual exactly" --
+    48.8 V, not 64 V -- see the parametrize comment above and registers.py.)
     """
     write = R.field_by_key(key).write
     assert write is not None

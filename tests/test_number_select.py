@@ -91,6 +91,18 @@ round 1" section for the falsifiability runs behind each:
   rejection text never appears (proving the guard skipped the key before
   HA's registry ever saw a duplicate, not that HA cleaned up after one this
   code shouldn't have tried to create).
+
+2026-09-14 (`overdischarge_voltage` max widened 120 -> 122, see
+`registers.py`): `test_number_entities_expose_the_write_range` gained
+`over_discharge_voltage` entity-level assertions (state 48.8, min 40.0,
+max 48.8), extending this file's existing voltage-threshold bound-pinning
+mechanism rather than adding a parallel one. This is the entity-level twin
+of `test_registers.py::test_voltage_threshold_write_ranges_match_manual`'s
+now-updated `overdischarge_voltage` row (100, 122). Falsifiability: with
+`registers.py`'s `max_raw` reverted to 120, this test's own `max ==
+pytest.approx(48.8)` assertion goes red (actual 48.0); widened past 122 it
+also goes red (actual > 48.8) -- see task-2-e00d-widening-report.md for the
+recorded transcript.
 """
 
 import pytest
@@ -109,8 +121,10 @@ async def test_number_entities_expose_the_write_range(
     """Pins bounds for a field per writable-field shape: a percentage field
     whose real range happens to coincide with HA's own NumberEntity
     defaults (0-100, `soc_low_alarm`), a 0.4-scale voltage threshold
-    (`boost_charge_voltage`), and the three ampere-scale fields (Fix round
-    1, minor point 2 -- previously pinned nowhere at all).
+    (`boost_charge_voltage`), a second voltage threshold whose max was
+    deliberately widened past the manual (`over_discharge_voltage`, see
+    below), and the three ampere-scale fields (Fix round 1, minor point 2
+    -- previously pinned nowhere at all).
 
     `soc_low_alarm`'s min/max assertions below do NOT by themselves prove
     this entity's own bounds wiring works -- `NumberEntity`'s installed
@@ -139,6 +153,20 @@ async def test_number_entities_expose_the_write_range(
     assert voltage.attributes["min"] == pytest.approx(48.0)
     assert voltage.attributes["max"] == pytest.approx(58.4)
     assert voltage.attributes["step"] == pytest.approx(0.4)
+
+    # overdischarge_voltage: max is 48.8 V (raw 122), NOT the inverter
+    # manual's own printed 48.0 V (raw 120) -- widened because Casa Justice
+    # inv1 has 0xE00D recorded at raw 122 in both captures of
+    # justice_inv1_settings.json, deliberately set to follow the battery
+    # manual's 49 V shutdown voltage instead (see registers.py's
+    # overdischarge_voltage comment for the full evidence chain). Pinning
+    # 48.8 here, not 48.0, is what catches this bound being reverted to 120
+    # OR widened past 122 -- either mutation moves this assertion off 48.8.
+    overdischarge = hass.states.get("number.justice_inv_1_over_discharge_voltage")
+    assert overdischarge.state == "48.8"
+    assert overdischarge.attributes["min"] == pytest.approx(40.0)
+    assert overdischarge.attributes["max"] == pytest.approx(48.8)
+    assert overdischarge.attributes["step"] == pytest.approx(0.4)
 
     # Fix round 1, minor point 2: the three current-scale (0.1 A) writable
     # fields, previously pinned nowhere in this file -- only the ten

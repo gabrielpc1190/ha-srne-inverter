@@ -300,10 +300,21 @@ FIELDS: tuple[Field, ...] = (
     Field(0xE000, 12, "undervoltage_alarm", "Under-voltage Alarm", scale=0.4,
           unit=V, device_class="voltage", write=WriteSpec(100, 130),
           category="config", precision=1),  # item 14: 40-52 V
+    # overdischarge_voltage max widened past the inverter manual's own
+    # printed range (item 12: 40-48 V, raw 100-120): Casa Justice inv1 has
+    # 0xE00D recorded at raw 122 (48.8 V) in BOTH captures of
+    # tests/fixtures/justice_inv1_settings.json, set deliberately by
+    # Redes-Clientes/CasaJustice/tools/justice_set_user_voltages.py to
+    # follow the BATTERY manual instead (BSM48280W Sec 3.2.2: "Shut Down
+    # (cut off) Voltage: 49 V", for an inverter without BMS communication)
+    # -- the write returned OK and persisted, so the firmware itself sides
+    # with the battery manual over the inverter manual's printed number.
+    # raw 122 = 48.8 V is the highest value on the 0.4 V grid strictly
+    # below that 49 V, so max_raw stops at 122, not 123 (49.2 V).
     Field(0xE000, 13, "overdischarge_voltage", "Over-discharge Voltage",
           scale=0.4, unit=V, device_class="voltage",
-          write=WriteSpec(100, 120), category="config",
-          precision=1),  # item 12: 40-48 V
+          write=WriteSpec(100, 122), category="config",
+          precision=1),  # item 12: 40-48 V manual; widened to 48.8 V, see above
     Field(0xE000, 14, "discharge_limit_voltage", "Discharge Limit Voltage",
           scale=0.4, unit=V, device_class="voltage",
           write=WriteSpec(100, 130), category="config",
