@@ -33,13 +33,15 @@ por dos motivos verificados durante el diseño (2026-09-13):
 
 ## Instalación
 
-**Por HACS** (repositorio custom): el repo vive en GitHub privado desde el 2026-09-14
-(`git@github.com:gabrielpc1190/ha-srne-inverter.git`, rama `main`). Se agrega en HACS como repositorio custom
-(tipo "Integración", URL `https://github.com/gabrielpc1190/ha-srne-inverter`) y se instala desde ahí — pendiente
-de hacerlo así en el HA de GADI, que hoy corre la copia instalada a mano (ver método manual abajo).
+**Por HACS** (repositorio custom) — método en uso en el HA de GADI desde el 2026-09-14: el repo vive en GitHub
+público (`https://github.com/gabrielpc1190/ha-srne-inverter`, rama `main` — el token OAuth de fábrica de HACS no
+tiene scope y no puede ver repos privados de nadie, así que se hizo público a propósito). Se agrega en HACS como
+repositorio custom (tipo "Integración") y se instala desde ahí; las actualizaciones de código llegan haciendo
+"Redownload" en HACS, sin volver a copiar archivos a mano.
 
-**Manual, por `scp`/`tar` sobre SSH** (el método usado en el despliegue real a Casa GADI): el shell Alpine del
-addon SSH de HA OS no trae `rsync`, así que se empaqueta y se copia por `tar`:
+**Manual, por `scp`/`tar` sobre SSH** (método de respaldo si HACS no está disponible; fue el método del primer
+despliegue real a Casa GADI antes de pasar a HACS): el shell Alpine del addon SSH de HA OS no trae `rsync`, así
+que se empaqueta y se copia por `tar`:
 
 ```bash
 tar -C custom_components -cf - srne_inverter | ssh GADI-HomeAssistant \
