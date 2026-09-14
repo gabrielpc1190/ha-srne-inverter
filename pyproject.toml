@@ -2,4 +2,4 @@
 asyncio_mode = "auto"
 testpaths = ["tests"]
 norecursedirs = [".venv", "docs"]
-addopts = "-q"
+addopts = "-q --timeout=30"

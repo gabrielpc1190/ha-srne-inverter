@@ -35,6 +35,18 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_PORT = 8899
 DEFAULT_TIMEOUT = 10.0
 
+# Bound for _discard_client()'s best-effort disconnect of a client we are
+# abandoning (a dead stale client found by connect(), a client whose connect()
+# attempt failed, or the client close() is releasing). Deliberately NOT tied
+# to `self.timeout` -- that value governs how long we wait for the DEVICE to
+# answer a request, whereas this one only bounds how long we wait for the
+# LIBRARY's socket teardown (writer.write/drain/close/wait_closed) to finish
+# on a socket that may be half-open and sitting on TCP retransmits. Without
+# this, a stalled disconnect() could hang connect()'s recovery path or
+# close()'s pause-switch path indefinitely -- the coordinator's backoff loop
+# would never receive the error it needs in order to back off at all.
+DISCARD_TIMEOUT = 2.0
+
 _Phase = Literal["connect", "request"]
 
 
@@ -85,81 +97,127 @@ class SolarmanV5Transport:
 
     @property
     def connected(self) -> bool:
-        """True when a client exists AND the library's own reader task has
-        not detected the socket dying underneath us.
+        """True when a client exists AND nothing indicates its background
+        reader loop has died underneath us.
 
-        pysolarmanv5's async client nulls its own `.reader`/`.writer`
-        attributes when its background reader loop exits for any reason
-        (remote close, reset, read error) -- see `_conn_keeper` in
-        pysolarmanv5_async.py. Deriving `connected` from that live state,
-        rather than merely "do we still hold a reference to a client object",
-        means a session that died in the background is reported as
-        disconnected immediately, without waiting for a caller to attempt
-        (and fail) a read or write first. This is what lets connect() below
-        tell "already connected" apart from "connected to a corpse".
+        Two independent live signals, because pysolarmanv5's async client
+        gives us two different corpses depending on how the reader died:
+
+        1. `.reader`/`.writer` are nulled by `_conn_keeper`'s tail -- but only
+           when its `while True` loop actually RETURNS (a caught
+           `ConnectionResetError`, or a clean EOF). Both attributes stay
+           non-None while that happens.
+        2. Any OTHER exception from `reader.read()` (ETIMEDOUT after an AP
+           reboot or a NAT-table eviction, ConnectionAbortedError, ...) is
+           NOT caught by `_conn_keeper`'s narrow `except ConnectionResetError`
+           -- it propagates straight out of the loop, so the tail that nulls
+           `.reader`/`.writer` never runs, but the task itself is `done()`
+           (with that exception set). Missing this second signal is exactly
+           how a session can die from a timeout-shaped cause and still read
+           as connected forever, permanently defeating connect()'s own
+           dead-session recovery below.
+
+        Checking both means a session that died in the background is
+        reported as disconnected immediately, under either failure shape,
+        without waiting for a caller to attempt (and fail) a read or write
+        first.
         """
-        return self._client is not None and self._client.reader is not None
+        if self._client is None or self._client.reader is None:
+            return False
+        reader_task = self._client.reader_task
+        if reader_task is not None and reader_task.done():
+            return False
+        return True
 
     async def connect(self) -> None:
-        if self.connected:
-            return
-        if self._client is not None:
-            # We still hold a reference, but the live check above says the
-            # session is dead (the reader task detected it in the
-            # background). Discard it before building a replacement --
-            # otherwise its abandoned socket, if still technically open,
-            # would sit on the logger's one TCP slot alongside the new one.
-            await self._discard_client(self._client)
-            self._client = None
-        client = PySolarmanV5Async(
-            self.host,
-            self.serial,
-            port=self.port,
-            mb_slave_id=self.slave_id,
-            socket_timeout=self.timeout,
-            auto_reconnect=False,
-            verbose=False,
-        )
-        try:
-            async with asyncio.timeout(self.timeout):
-                await client.connect()
-        except Exception as err:
-            # Our own deadline races the library's own `wait_for` and always
-            # fires first (both are set to `self.timeout`), so most connect
-            # failures reach us as a plain TimeoutError, not wrapped by the
-            # library at all. But if the library's connect() completed (or
-            # failed with something other than a timeout) right underneath
-            # our cancellation, `client` may already hold a live socket --
-            # discard it so it does not sit open, occupying the logger's one
-            # TCP slot until garbage collection.
-            await self._discard_client(client)
-            raise self._translate(err, phase="connect") from err
-        self._client = client
-        _LOGGER.debug("Connected to logger %s (%s)", self.serial, self.host)
+        """Open the connection, or rebuild it if the session died silently.
+
+        Takes the same private lock as read_holding/write_holding/close()/
+        atomic() for its ENTIRE body -- not just the discard steps -- so that
+        a connect() racing a close() (a manual pause landing mid-reconnect) or
+        two overlapping connect() calls (a reload racing a backoff retry)
+        cannot interleave. Without this, a close() that finds `_client is
+        None` while a connect() is still in flight would return immediately,
+        and the in-flight connect() would then assign its client afterward --
+        leaving the logger held after an explicit pause, which is exactly the
+        contract this transport exists to guarantee never happens. Same lock
+        also means two concurrent connect() calls cannot both pass the
+        `self.connected` check and each open their own socket to a device with
+        exactly one slot, leaking the first.
+        """
+        async with self._lock:
+            if self.connected:
+                return
+            if self._client is not None:
+                # We still hold a reference, but the live check above says
+                # the session is dead (the reader task detected it in the
+                # background, or died from an uncaught read exception).
+                # Discard it before building a replacement -- otherwise its
+                # abandoned socket, if still technically open, would sit on
+                # the logger's one TCP slot alongside the new one.
+                await self._discard_client(self._client)
+                self._client = None
+            client = PySolarmanV5Async(
+                self.host,
+                self.serial,
+                port=self.port,
+                mb_slave_id=self.slave_id,
+                socket_timeout=self.timeout,
+                auto_reconnect=False,
+                verbose=False,
+            )
+            try:
+                async with asyncio.timeout(self.timeout):
+                    await client.connect()
+            except Exception as err:
+                # Our own deadline races the library's own `wait_for` and
+                # always fires first (both are set to `self.timeout`), so
+                # most connect failures reach us as a plain TimeoutError, not
+                # wrapped by the library at all. But if the library's
+                # connect() completed (or failed with something other than a
+                # timeout) right underneath our cancellation, `client` may
+                # already hold a live socket -- discard it (bounded by its
+                # own DISCARD_TIMEOUT, well inside this method's lock scope)
+                # so it does not sit open, occupying the logger's one TCP
+                # slot until garbage collection.
+                await self._discard_client(client)
+                raise self._translate(err, phase="connect") from err
+            self._client = client
+            _LOGGER.debug("Connected to logger %s (%s)", self.serial, self.host)
 
     async def close(self) -> None:
         """Close the connection. Waits for any in-flight read/write first.
 
-        close() takes the same private lock read_holding/write_holding use,
-        so a pause request that arrives mid-poll does not cancel the
-        in-flight operation's reader task out from under it (which -- with
-        pysolarmanv5's async client -- would otherwise leave that operation
-        parked on a queue nothing will ever feed, so it silently eats the
-        full `timeout` and reports itself as a TransportTimeoutError, even
-        though the true cause was a deliberate pause, not a network fault).
-        Waiting instead means the in-flight operation resolves on its own
-        terms -- success or its own genuine timeout -- and close() proceeds
-        right after. Do not call close() from within an `atomic()` block on
-        the same task; that still deadlocks, symmetric to any other
-        "don't hold a lock and then wait on it again" rule -- it is not the
-        pattern Finding 1 was about (bracketing a write+read-back), and
-        `atomic()`'s own docstring says as much.
+        close() takes the same private lock read_holding/write_holding/
+        connect()/atomic() use, so a pause request that arrives mid-poll
+        does not cancel the in-flight operation's reader task out from under
+        it (which -- with pysolarmanv5's async client -- would otherwise
+        leave that operation parked on a queue nothing will ever feed, so it
+        silently eats the full `timeout` and reports itself as a
+        TransportTimeoutError, even though the true cause was a deliberate
+        pause, not a network fault). Waiting instead means the in-flight
+        operation resolves on its own terms -- success or its own genuine
+        timeout -- and close() proceeds right after. Do not call close() from
+        within an `atomic()` block on the same task; that still deadlocks,
+        symmetric to any other "don't hold a lock and then wait on it again"
+        rule -- it is not the pattern Finding 1 was about (bracketing a
+        write+read-back), and `atomic()`'s own docstring says as much.
+
+        `self._client` is nulled only AFTER `_discard_client` returns, not
+        before -- if this coroutine is cancelled while the discard is still
+        in flight, the client stays referenced by `self._client` rather than
+        being silently dropped. A dropped-but-still-open socket would be a
+        leak nothing could ever retry (connect()'s stale-client discard only
+        fires when `self._client is not None`); leaving the reference in
+        place means the NEXT connect() or close() call gets another chance to
+        finish disconnecting it.
         """
         async with self._lock:
-            client, self._client = self._client, None
+            client = self._client
             if client is None:
                 return
             await self._discard_client(client)
+            self._client = None
 
     async def read_holding(self, addr: int, count: int) -> list[int]:
         async with self._lock:
@@ -189,9 +247,22 @@ class SolarmanV5Transport:
         lock already held by this context manager -- calling the transport's
         own public read_holding/write_holding from inside this block would
         deadlock, since asyncio.Lock is not reentrant.
+
+        The yielded object is invalidated the instant this block exits --
+        normally, via an exception, or via cancellation (the `finally` runs
+        in all three cases). Stashing it and calling it later would silently
+        run outside the lock, which is worse than not having atomic() at
+        all: two Modbus requests could end up in flight at once on a client
+        whose data_queue holds exactly one response, so one request's answer
+        gets delivered to the other's waiter, or gets dropped for a sequence
+        mismatch and times out. A late call raises RuntimeError instead.
         """
         async with self._lock:
-            yield _LockedOperations(self)
+            session = _LockedOperations(self)
+            try:
+                yield session
+            finally:
+                session._invalidate()
 
     async def _read_holding_locked(self, addr: int, count: int) -> list[int]:
         """read_holding's body, assuming the caller already holds self._lock."""
@@ -227,9 +298,27 @@ class SolarmanV5Transport:
         connect() attempt we are giving up on). Safe to call on a client
         whose connect() never succeeded -- disconnect() no-ops when its
         reader_task/writer were never set.
+
+        Bounded by DISCARD_TIMEOUT, separately from `self.timeout`:
+        disconnect() does `writer.write(b"")`, `await writer.drain()`,
+        `writer.close()`, `await writer.wait_closed()` -- on a half-open
+        socket those can sit on TCP retransmits for minutes. Without this
+        bound, a stalled disconnect() would hang whichever public method
+        called this (connect() or close()) for that long, and the
+        coordinator's backoff loop would never receive the error it needs in
+        order to back off from anything -- it would just stop, silently,
+        instead of degrading. Giving up after DISCARD_TIMEOUT and treating
+        the client as discarded either way is safe: this is a best-effort
+        cleanup, not a correctness requirement, and the exception this
+        raises internally on expiry is swallowed by the same `except
+        Exception` as any other disconnect failure -- but an externally
+        raised CancelledError (the caller's own task being cancelled, not
+        this timeout's own deadline) is NOT swallowed here, and must not be:
+        see close()'s docstring for why the caller needs to see that.
         """
         try:
-            await client.disconnect()
+            async with asyncio.timeout(DISCARD_TIMEOUT):
+                await client.disconnect()
         except Exception:  # noqa: BLE001 - best-effort, never raise from here
             _LOGGER.debug(
                 "Ignoring error while discarding a stale client for %s",
@@ -333,14 +422,32 @@ class SolarmanV5Transport:
 class _LockedOperations:
     """Read/write access to a SolarmanV5Transport while its lock is already
     held. Returned only by SolarmanV5Transport.atomic(); never construct
-    directly.
+    directly. Invalidated by atomic()'s `finally` the instant its `async
+    with` block exits -- see AtomicOperations' docstring in transport.base
+    for why a stashed, post-block handle must not keep working.
     """
 
     def __init__(self, transport: SolarmanV5Transport) -> None:
         self._transport = transport
+        self._valid = True
+
+    def _invalidate(self) -> None:
+        self._valid = False
+
+    def _check_valid(self) -> None:
+        if not self._valid:
+            raise RuntimeError(
+                "this atomic() handle is no longer valid -- it can only be "
+                "used inside the `async with transport.atomic() as t:` "
+                "block that produced it; the block has already exited, and "
+                "using the handle afterward would run outside the lock "
+                "atomic() exists to provide"
+            )
 
     async def read_holding(self, addr: int, count: int) -> list[int]:
+        self._check_valid()
         return await self._transport._read_holding_locked(addr, count)
 
     async def write_holding(self, addr: int, value: int) -> None:
+        self._check_valid()
         await self._transport._write_holding_locked(addr, value)

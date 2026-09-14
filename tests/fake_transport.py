@@ -18,7 +18,9 @@ dict with no such holes (at the cost of synthetic filler values).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import asyncio
+from collections.abc import AsyncIterator, Iterable, Sequence
+from contextlib import asynccontextmanager
 
 from custom_components.srne_inverter.transport.base import (
     InvalidRegisterValueError,
@@ -139,6 +141,7 @@ class FakeTransport:
         self.connect_count = 0
         self.close_count = 0
         self._connected = False
+        self._lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
@@ -171,6 +174,35 @@ class FakeTransport:
         return self._write_errors.pop(0)
 
     async def read_holding(self, addr: int, count: int) -> list[int]:
+        async with self._lock:
+            return await self._read_holding_locked(addr, count)
+
+    async def write_holding(self, addr: int, value: int) -> None:
+        async with self._lock:
+            await self._write_holding_locked(addr, value)
+
+    @asynccontextmanager
+    async def atomic(self) -> AsyncIterator["_FakeLockedOperations"]:
+        """See transport.base.Transport.atomic -- mirrors the real
+        SolarmanV5Transport's atomic() exactly: acquires the SAME lock
+        read_holding/write_holding use (so it genuinely serialises against
+        them, not against some independent lock that would let a concurrent
+        plain read/write slip in mid-block), yields un-locked operations for
+        the duration of the block, and invalidates the yielded handle the
+        instant the block exits -- normally, via an exception, or via
+        cancellation -- so a caller that stashes it and calls it later gets
+        RuntimeError instead of silently running outside the lock. This is
+        what lets Task 7/12/15 test a write-plus-read-back bracket against
+        this fake instead of only against the real transport.
+        """
+        async with self._lock:
+            session = _FakeLockedOperations(self)
+            try:
+                yield session
+            finally:
+                session._invalidate()
+
+    async def _read_holding_locked(self, addr: int, count: int) -> list[int]:
         # Not-connected is checked BEFORE recording the attempt: a call the
         # fake refuses outright never touched anything, so it must not show
         # up in `reads` -- otherwise "the pause switch left the log empty"
@@ -199,7 +231,7 @@ class FakeTransport:
                 )
         return [self.registers[addr + i] for i in range(count)]
 
-    async def write_holding(self, addr: int, value: int) -> None:
+    async def _write_holding_locked(self, addr: int, value: int) -> None:
         # Same rule as read_holding: not-connected is checked BEFORE
         # recording the attempt.
         if not self._connected:
@@ -232,3 +264,37 @@ class FakeTransport:
         if addr in self.no_stick_writes:
             return
         self.registers[addr] = value
+
+
+class _FakeLockedOperations:
+    """Read/write access to a FakeTransport while its lock is already held.
+
+    Returned only by FakeTransport.atomic(); never construct directly.
+    Mirrors custom_components.srne_inverter.transport.solarman_v5's
+    _LockedOperations exactly, including the post-block invalidation.
+    """
+
+    def __init__(self, transport: FakeTransport) -> None:
+        self._transport = transport
+        self._valid = True
+
+    def _invalidate(self) -> None:
+        self._valid = False
+
+    def _check_valid(self) -> None:
+        if not self._valid:
+            raise RuntimeError(
+                "this atomic() handle is no longer valid -- it can only be "
+                "used inside the `async with transport.atomic() as t:` "
+                "block that produced it; the block has already exited, and "
+                "using the handle afterward would run outside the lock "
+                "atomic() exists to provide"
+            )
+
+    async def read_holding(self, addr: int, count: int) -> list[int]:
+        self._check_valid()
+        return await self._transport._read_holding_locked(addr, count)
+
+    async def write_holding(self, addr: int, value: int) -> None:
+        self._check_valid()
+        await self._transport._write_holding_locked(addr, value)
