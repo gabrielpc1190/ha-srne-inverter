@@ -103,7 +103,17 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
 
     @property
     def support(self) -> dict[int, BlockSupport]:
-        return self.probe_result.support if self.probe_result else {}
+        # Fix round 2 (Task 7 review): return a COPY, not the live dict.
+        # self.probe_result.support is the exact object _read_due_blocks
+        # mutates in place for the UnsupportedRegisterError reclassification
+        # (Fix round 1, Finding 1), and every internal reader (this class's
+        # own supported_field_keys(), the block-polling filter, SrneData
+        # construction) reads it, never mutates it -- so handing out the
+        # live dict costs nothing internally but lets any external caller
+        # (any of the eight downstream tasks) corrupt the coordinator's own
+        # capability map by mutating what looked like a harmless snapshot,
+        # silently, with no error and no test to catch it.
+        return dict(self.probe_result.support) if self.probe_result else {}
 
     def supported_field_keys(self) -> set[str]:
         """Field and derived keys whose blocks answered during the probe."""
