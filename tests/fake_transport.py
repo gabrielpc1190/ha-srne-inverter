@@ -138,6 +138,14 @@ class FakeTransport:
         self.no_stick_writes = frozenset(no_stick_writes)
         self.reads: list[tuple[int, int]] = []
         self.writes: list[tuple[int, int]] = []
+        # Fix round 1 (Task 7 review, Finding 5): `reads`/`writes` are each
+        # ordered internally but not against EACH OTHER, so nothing lets a
+        # test tell whether a concurrent read landed between a write and
+        # its own read-back -- exactly what atomic() exists to prevent. This
+        # is a recording change only (it observes, it does not validate or
+        # decide anything a real device would), so it does not cross the
+        # "a fake must not implement the logic under test" line.
+        self.operations: list[tuple[str, int, int]] = []
         self.connect_count = 0
         self.close_count = 0
         self._connected = False
@@ -243,6 +251,7 @@ class FakeTransport:
                 f"fake: not connected, cannot read 0x{addr:04X}"
             )
         self.reads.append((addr, count))
+        self.operations.append(("read", addr, count))
         error = self._next_read_error()
         if error is not None:
             raise error
@@ -270,6 +279,7 @@ class FakeTransport:
                 f"fake: not connected, cannot write 0x{addr:04X}"
             )
         self.writes.append((addr, value))
+        self.operations.append(("write", addr, value))
         error = self._next_write_error()
         if error is not None:
             raise error
