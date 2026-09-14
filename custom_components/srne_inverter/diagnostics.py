@@ -69,16 +69,27 @@ conversation must be able to tell, from the file alone, what went wrong:
    `coordinator.data` is unavailable -- `registers_source` says which one a
    reader is looking at.
 
-Also fixed: `values["inverter_serial"]` (the INVERTER's own serial, decoded
-from a `registers.FieldKind.SERIAL` field) used to ship unmasked while
-`entry.data["serial"]` (the LOGGER's serial) was fully redacted a few keys
-up -- an inconsistency, not a deliberate choice. It is now masked to its
-last 4 characters, and a `generated_at` timestamp plus `registers_source`
-make clear that the register/value dump below is a CUMULATIVE snapshot
-across three independently-scheduled tiers (HOT every `scan_interval` s,
-WARM every `warm_interval` s, COLD every `cold_interval` s -- see the
-`coordinator` section's own interval fields), not everything read at the
-same instant this file was generated.
+Also fixed: `values["inverter_serial"]` (decoded from a
+`registers.FieldKind.SERIAL` field, at the time believed to be the
+inverter's own serial) used to ship unmasked while `entry.data["serial"]`
+(the LOGGER's serial) was fully redacted a few keys up -- an inconsistency,
+not a deliberate choice. It is now masked to its last 4 characters, and a
+`generated_at` timestamp plus `registers_source` make clear that the
+register/value dump below is a CUMULATIVE snapshot across three
+independently-scheduled tiers (HOT every `scan_interval` s, WARM every
+`warm_interval` s, COLD every `cold_interval` s -- see the `coordinator`
+section's own interval fields), not everything read at the same instant
+this file was generated.
+
+2026-09-14 correction: live evidence showed that field is NOT the
+inverter's serial after all (see registers.py's own comment on
+0x0018-0x001B) -- it was renamed `device_info_tail` and `FieldKind.SERIAL`
+was renamed `FieldKind.HEX_WORDS`, a purely mechanical decode kind that
+implies no identity. The masking below is UNCHANGED and still applies to
+it (and to any future multi-word hex field): it is a defensive default for
+"an unverified multi-word diagnostic value", not specifically a serial
+mask, and costs nothing to keep even though this particular field turned
+out not to be identifying.
 
 Deliberately NOT gated on a bare `hasattr(entry, "runtime_data")` check:
 that attribute can be `True` against a dead coordinator (SETUP_RETRY/
@@ -110,18 +121,24 @@ from .const import CONF_SERIAL
 # owner, and the raw register dump is the entire reason this file exists.
 # The logger's own web UI basic-auth credentials (admin/admin) are
 # hardcoded in `logger_web.py`, never stored in `entry.data`, so there is
-# nothing to redact for them here. The INVERTER's own serial
-# (`values["inverter_serial"]`) is a decoded VALUE, not a dict key
-# `async_redact_data` can reach -- see `_mask_serial`/`_redact_values`
-# below, and `_redact_text` for the free-form error strings that can embed
-# the host the same way `TO_REDACT` embeds it as a dict value.
+# nothing to redact for them here. The decoded HEX_WORDS field
+# (`values["device_info_tail"]`, formerly believed to be the inverter's
+# serial -- see registers.py's 2026-09-14 correction) is a decoded VALUE,
+# not a dict key `async_redact_data` can reach -- see `_mask_serial`/
+# `_redact_values` below, and `_redact_text` for the free-form error
+# strings that can embed the host the same way `TO_REDACT` embeds it as a
+# dict value.
 TO_REDACT = {CONF_HOST, CONF_SERIAL}
 
-# The one field kind that decodes to an identifying string today
-# (registers.FIELDS has exactly one: "inverter_serial"). Computed from the
-# field table rather than hardcoding the key, so a future SERIAL-kind field
-# is covered automatically instead of silently shipping unmasked.
-_SERIAL_VALUE_KEYS = frozenset(f.key for f in R.FIELDS if f.kind is R.FieldKind.SERIAL)
+# Every field decoded as a multi-word hex string today (registers.FIELDS
+# has exactly one: "device_info_tail" -- not actually the inverter's
+# serial, per its own 2026-09-14 correction, but still masked defensively
+# as an unverified multi-word diagnostic value). Computed from the field
+# table rather than hardcoding the key, so a future HEX_WORDS-kind field is
+# covered automatically instead of silently shipping unmasked.
+_HEX_WORDS_VALUE_KEYS = frozenset(
+    f.key for f in R.FIELDS if f.kind is R.FieldKind.HEX_WORDS
+)
 
 
 def _redact_text(text: str | None, host: str) -> str | None:
@@ -152,9 +169,9 @@ def _mask_serial(value: str) -> str:
 
 
 def _redact_values(values: dict[str, object]) -> dict[str, object]:
-    """Copy `values`, masking every `FieldKind.SERIAL`-decoded field."""
+    """Copy `values`, masking every `FieldKind.HEX_WORDS`-decoded field."""
     redacted = dict(values)
-    for key in _SERIAL_VALUE_KEYS:
+    for key in _HEX_WORDS_VALUE_KEYS:
         value = redacted.get(key)
         if isinstance(value, str):
             redacted[key] = _mask_serial(value)

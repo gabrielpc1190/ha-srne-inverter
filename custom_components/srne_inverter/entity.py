@@ -150,8 +150,9 @@ class SrneFieldEntity(SrneEntity):
         """The undecoded register word(s), exposed as an attribute.
 
         Fix round 1 (Task 9 review, Finding 5): a field spanning more than
-        one register (`field.words > 1` -- `inverter_serial`, words=4, and
-        the three multi-word energy totals) used to return only the FIRST
+        one register (`field.words > 1` -- `device_info_tail` (renamed from
+        `inverter_serial`, see registers.py), words=4, and the three
+        multi-word energy totals) used to return only the FIRST
         word via a single `.get(field.address)` lookup, silently dropping
         every other word the field is actually made of. A support session
         reading `raw: 0` next to a correct-looking kWh total would

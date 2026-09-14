@@ -1,0 +1,7 @@
+{
+ "note": "E007 deliberately set different from E008 to break the equalize/boost ambiguity; restored immediately after",
+ "E007_equalize": 142,
+ "E008_boost": 144,
+ "E009_float": 144,
+ "scale": 0.4
+}
