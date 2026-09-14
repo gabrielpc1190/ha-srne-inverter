@@ -58,11 +58,46 @@ Two tests beyond the brief's six:
   from a write that is silently accepted but does not stick. See this file's
   deviation note 3 above and `coordinator.async_write_raw`'s docstring for
   why the two shapes produce different messages.
+
+Fix round 1 (Opus re-review) additions -- see task-11-report.md's own "Fix
+round 1" section for the falsifiability runs behind each:
+
+- `test_out_of_range_refusal_names_our_bounds_not_ha_defaults` (Important):
+  the original `test_number_out_of_range_is_refused` (`soc_low_alarm`/250)
+  and the original `soc_low_alarm` min/max assertions in
+  `test_number_entities_expose_the_write_range` both happen to use a field
+  whose REAL range (0-100) is identical to `NumberEntity`'s own installed
+  defaults (`DEFAULT_MIN_VALUE=0.0`/`DEFAULT_MAX_VALUE=100.0`) -- so neither
+  one can tell "our WriteSpec-derived bounds are wired to this entity" apart
+  from "HA's own defaults happen to produce the same number". Measured:
+  deleting `SrneNumber.__init__`'s entire bounds-assignment block left 8 of
+  this file's (then) 9 tests green. The new test uses `equalize_voltage`
+  (48.0-58.0 V, exact at this scale) and a value (65.0) chosen to be inside
+  HA's default range but outside ours, then asserts the raised
+  `ServiceValidationError`'s `translation_placeholders` NAME our bounds
+  (`"48.0"`/`"58.0"`), not HA's defaults -- the one assertion shape that
+  actually distinguishes the two.
+- `test_number_entities_expose_the_write_range` additionally pins the three
+  ampere-scale writable fields (`charge_stop_current`,
+  `ac_charge_current_limit`, `max_charge_current` -- minor point 2: these
+  had no entity-level bound assertion anywhere before this round).
+- `test_reprobe_signal_does_not_duplicate_number_entities` and
+  `test_reprobe_signal_does_not_duplicate_select_entities` (minor point 3):
+  `number.py`/`select.py`'s own `added_field_keys` dedup branches had no
+  signal and no test, unlike `sensor.py`'s equivalent (Fix round 2, commit
+  `ce62625`) -- both platforms now log a DEBUG line naming the skipped key
+  on that branch, and the new tests assert on that text via `caplog`, plus
+  a negative assertion that HA's own "does not generate unique IDs"
+  rejection text never appears (proving the guard skipped the key before
+  HA's registry ever saw a duplicate, not that HA cleaned up after one this
+  code shouldn't have tried to create).
 """
 
 import pytest
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+from custom_components.srne_inverter.const import SIGNAL_NEW_ENTITIES
 from custom_components.srne_inverter.transport.base import InvalidRegisterValueError
 from tests.fake_transport import DEFAULT_UNSUPPORTED, FakeTransport
 from tests.test_init import setup_entry
@@ -71,6 +106,24 @@ from tests.test_init import setup_entry
 async def test_number_entities_expose_the_write_range(
     hass, justice_registers_synthetic_complete, enable_custom_integrations
 ):
+    """Pins bounds for a field per writable-field shape: a percentage field
+    whose real range happens to coincide with HA's own NumberEntity
+    defaults (0-100, `soc_low_alarm`), a 0.4-scale voltage threshold
+    (`boost_charge_voltage`), and the three ampere-scale fields (Fix round
+    1, minor point 2 -- previously pinned nowhere at all).
+
+    `soc_low_alarm`'s min/max assertions below do NOT by themselves prove
+    this entity's own bounds wiring works -- `NumberEntity`'s installed
+    defaults are `DEFAULT_MIN_VALUE=0.0`/`DEFAULT_MAX_VALUE=100.0`, so they
+    would read identically even with `SrneNumber.__init__`'s entire bounds
+    block deleted. Confirmed by hand (Fix round 1 falsifiability run,
+    recorded in task-11-report.md): deleting that block leaves 8 of this
+    file's 9 original tests green, this one included, for exactly that
+    reason. `test_out_of_range_refusal_names_our_bounds_not_ha_defaults`
+    below is the test that actually discriminates our wiring from HA's
+    defaults; kept here anyway because it is still a true statement about
+    the entity's displayed state.
+    """
     await setup_entry(hass, FakeTransport(justice_registers_synthetic_complete))
     state = hass.states.get("number.justice_inv_1_soc_low_alarm")
     assert state.state == "15.0"
@@ -81,10 +134,73 @@ async def test_number_entities_expose_the_write_range(
     assert voltage.state == "57.6"
     # Manufacturer's per-parameter range (manual item 09: 48-58.4 V), NOT the
     # blanket 40-64 V this task's brief warns against reintroducing -- see
-    # this file's module docstring, deviation 2.
+    # this file's module docstring, deviation 2. This one DOES discriminate
+    # our wiring from HA's defaults (58.4 != 100).
     assert voltage.attributes["min"] == pytest.approx(48.0)
     assert voltage.attributes["max"] == pytest.approx(58.4)
     assert voltage.attributes["step"] == pytest.approx(0.4)
+
+    # Fix round 1, minor point 2: the three current-scale (0.1 A) writable
+    # fields, previously pinned nowhere in this file -- only the ten
+    # voltage thresholds had any entity-level bound assertion at all.
+    charge_stop_current = hass.states.get("number.justice_inv_1_charge_stop_current")
+    assert charge_stop_current.attributes["min"] == pytest.approx(0.0)
+    assert charge_stop_current.attributes["max"] == pytest.approx(10.0)
+
+    ac_charge_limit = hass.states.get("number.justice_inv_1_ac_charge_current_limit")
+    assert ac_charge_limit.attributes["min"] == pytest.approx(0.0)
+    assert ac_charge_limit.attributes["max"] == pytest.approx(120.0)
+
+    max_charge_current = hass.states.get("number.justice_inv_1_max_charge_current")
+    assert max_charge_current.attributes["min"] == pytest.approx(0.0)
+    assert max_charge_current.attributes["max"] == pytest.approx(200.0)
+
+
+async def test_out_of_range_refusal_names_our_bounds_not_ha_defaults(
+    hass, justice_registers_synthetic_complete, enable_custom_integrations
+):
+    """Fix round 1 (Opus review, Important): the ONLY test that can
+    actually tell "our WriteSpec-derived bounds are wired to this entity"
+    apart from "HA's own NumberEntity defaults (0-100) happen to let this
+    through/refuse it anyway".
+
+    `equalize_voltage`'s real range is 48.0-58.0 V (`WriteSpec(120, 145)`,
+    exact at this scale -- no float noise to fight in the assertion). 65.0
+    is chosen deliberately: ABOVE our real max (58.0) but still INSIDE HA's
+    own NumberEntity default range (0.0-100.0). With the entity's bounds
+    wired correctly, `homeassistant.components.number`'s own
+    `async_set_value` service handler checks `value < entity.min_value or
+    value > entity.max_value` BEFORE ever calling `async_set_native_value`
+    and raises `ServiceValidationError` (a `HomeAssistantError` subclass)
+    with `translation_placeholders["min_value"]`/`["max_value"]` set from
+    `entity.min_value`/`entity.max_value` -- i.e. FROM `_attr_native_min_value`/
+    `_attr_native_max_value`, which is exactly what this test pins by
+    asserting their string values name 48.0/58.0, not 0.0/100.0.
+
+    Falsifiability (Fix round 1, recorded in task-11-report.md): deleting
+    `SrneNumber.__init__`'s bounds-assignment block makes `native_min_value`/
+    `native_max_value` fall back to HA's `DEFAULT_MIN_VALUE`/
+    `DEFAULT_MAX_VALUE` (0.0/100.0) -- 65.0 is INSIDE that default range, so
+    HA's own service-level check no longer fires at all, and this test's
+    `pytest.raises(ServiceValidationError)` fails to match (the call instead
+    proceeds to `registers.encode()`, which raises a plain `ValueError` --
+    wrapped as a plain `HomeAssistantError`, not a `ServiceValidationError`,
+    by `coordinator.async_write_field` -- a different exception TYPE, not
+    just different text). Confirmed by hand: this exact mutation turns this
+    test red while leaving `test_number_out_of_range_is_refused` (below,
+    `soc_low_alarm`/250) green, which is precisely the gap this test closes.
+    """
+    transport = FakeTransport(justice_registers_synthetic_complete)
+    await setup_entry(hass, transport)
+    with pytest.raises(ServiceValidationError) as excinfo:
+        await hass.services.async_call(
+            "number", "set_value",
+            {"entity_id": "number.justice_inv_1_equalize_voltage", "value": 65.0},
+            blocking=True,
+        )
+    assert excinfo.value.translation_placeholders["min_value"] == "48.0"
+    assert excinfo.value.translation_placeholders["max_value"] == "58.0"
+    assert transport.writes == []
 
 
 async def test_setting_a_number_writes_and_reads_back(
@@ -220,3 +336,74 @@ async def test_writable_fields_of_an_unsupported_block_are_not_created(
     assert hass.states.get("number.justice_inv_1_ac_charge_current_limit") is None
     assert hass.states.get("number.justice_inv_1_max_charge_current") is None
     assert hass.states.get("number.justice_inv_1_soc_low_alarm") is not None
+
+
+async def test_reprobe_signal_does_not_duplicate_number_entities(
+    hass, justice_registers_synthetic_complete, enable_custom_integrations, caplog
+):
+    """Fix round 1 (Opus review, minor point 3): `number.py`'s own
+    `added_field_keys` dedup branch had no signal and no test, unlike
+    `sensor.py`'s equivalent guard (Fix round 2, commit ce62625) -- firing
+    `SIGNAL_NEW_ENTITIES` a second time with nothing newly supported used to
+    be provable only by "the entity id set didn't change", which HA's own
+    entity registry would produce anyway even with this guard deleted (a
+    duplicate unique_id is independently rejected there, logged as "...does
+    not generate unique IDs... already exists - ignoring"). The debug line
+    `number.py`'s builder() now emits on this branch specifically
+    discriminates "our guard skipped it" from "HA cleaned up after us".
+
+    A first draft of this test asserted only the bare substring
+    `"already added, skipping re-probe rebuild" in caplog.text`, with no
+    check on WHICH logger emitted it -- and that passed even with this
+    file's own mutation of `number.py`'s log line alone, because
+    `SIGNAL_NEW_ENTITIES` is ONE shared dispatcher signal every platform on
+    this entry listens to (`entity.py`'s own `async_setup_field_platform`
+    docstring); firing it re-runs ALL SIX platforms' builders in the same
+    call, and `sensor.py`/`select.py`'s own (unmutated) dedup branches log
+    the exact same text for their own already-added fields. Filtering
+    `caplog.records` by `record.name == "custom_components.srne_inverter.
+    number"` is what actually isolates THIS platform's own guard.
+    """
+    entry = await setup_entry(hass, FakeTransport(justice_registers_synthetic_complete))
+    before = set(hass.states.async_entity_ids("number"))
+    caplog.clear()
+    async_dispatcher_send(hass, SIGNAL_NEW_ENTITIES.format(entry_id=entry.entry_id))
+    await hass.async_block_till_done()
+    after = set(hass.states.async_entity_ids("number"))
+    assert after == before
+    own_debug_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "custom_components.srne_inverter.number"
+    ]
+    assert any(
+        "already added, skipping re-probe rebuild" in line for line in own_debug_lines
+    ), caplog.text
+    assert "does not generate unique IDs" not in caplog.text
+
+
+async def test_reprobe_signal_does_not_duplicate_select_entities(
+    hass, justice_registers_synthetic_complete, enable_custom_integrations, caplog
+):
+    """Same as `test_reprobe_signal_does_not_duplicate_number_entities`
+    above, for `select.py`'s own dedup branch (Fix round 1, minor point 3) --
+    including the same logger-name filter, for the same reason (one shared
+    `SIGNAL_NEW_ENTITIES` re-runs every platform's builder, not just this
+    one).
+    """
+    entry = await setup_entry(hass, FakeTransport(justice_registers_synthetic_complete))
+    before = set(hass.states.async_entity_ids("select"))
+    caplog.clear()
+    async_dispatcher_send(hass, SIGNAL_NEW_ENTITIES.format(entry_id=entry.entry_id))
+    await hass.async_block_till_done()
+    after = set(hass.states.async_entity_ids("select"))
+    assert after == before
+    own_debug_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "custom_components.srne_inverter.select"
+    ]
+    assert any(
+        "already added, skipping re-probe rebuild" in line for line in own_debug_lines
+    ), caplog.text
+    assert "does not generate unique IDs" not in caplog.text
