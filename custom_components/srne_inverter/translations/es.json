@@ -1,0 +1,67 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Inversor SRNE por logger Solarman",
+        "description": "Dejá el serial vacío para leerlo de http://<host>/status.html (auth básica admin/admin). En paralelo, el inversor host es esclavo 1 y el segundo es esclavo 2.",
+        "data": {
+          "name": "Nombre",
+          "host": "IP del logger",
+          "port": "Puerto TCP",
+          "serial": "Serial del logger (opcional)",
+          "slave_id": "Esclavo Modbus",
+          "scan_interval": "Intervalo rápido (segundos)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se pudo conectar con el logger. Revisá la IP y el puerto, y que el logger esté encendido y alcanzable en la red. Si estás seguro de que es alcanzable, alguna otra herramienta (un monitor que quedó corriendo, otra entrada apuntando a este mismo logger) podría estar usando su único cupo de conexión.",
+      "cannot_read_serial": "No se pudo leer el serial de http://<host>/status.html. Escribilo a mano.",
+      "invalid_serial": "El serial debe ser solo dígitos.",
+      "invalid_slave": "El logger respondió pero el inversor no. Revisá el esclavo Modbus (host = 1, segundo = 2).",
+      "unknown": "Error inesperado. Mirá el log de Home Assistant."
+    },
+    "abort": {
+      "already_configured": "Este logger ya está configurado."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Intervalos de sondeo",
+        "data": {
+          "scan_interval": "Rápido (batería, red, carga) en segundos",
+          "warm_interval": "Bloques de configuración, en segundos",
+          "cold_interval": "Info del equipo y contadores, en segundos"
+        }
+      }
+    }
+  },
+  "services": {
+    "read_register": {
+      "name": "Leer registro",
+      "description": "Lee registros holding crudos de un inversor.",
+      "fields": {
+        "device_id": {"name": "Equipo", "description": "Inversor a leer."},
+        "address": {"name": "Dirección", "description": "Primer registro (decimal o 0x hex)."},
+        "count": {"name": "Cantidad", "description": "Cuántos registros leer."}
+      }
+    },
+    "write_register": {
+      "name": "Escribir registro",
+      "description": "Escribe un registro holding crudo y verifica la relectura.",
+      "fields": {
+        "device_id": {"name": "Equipo", "description": "Inversor a escribir."},
+        "address": {"name": "Dirección", "description": "Registro (decimal o 0x hex)."},
+        "value": {"name": "Valor", "description": "Valor crudo del registro."}
+      }
+    },
+    "reprobe": {
+      "name": "Re-sondear",
+      "description": "Vuelve a leer todos los bloques y agrega las entidades que aparecieron.",
+      "fields": {
+        "device_id": {"name": "Equipo", "description": "Inversor a sondear."}
+      }
+    }
+  }
+}
