@@ -13,7 +13,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import SrneConfigEntry
 from .coordinator import SrneCoordinator
 from .entity import SrneEntity, SrneFieldEntity, async_setup_field_platform
-from .registers import DERIVED, FIELDS, Derived, Field, FieldKind
+from .probe import BlockSupport
+from .registers import DERIVED, FIELDS, Derived, Field, FieldKind, field_by_key
 
 
 def _display_value(value: object, precision: int | None) -> object:
@@ -140,12 +141,45 @@ class SrneDerivedSensor(SrneEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, entry, derived.key, derived.label)
         self._derived = derived
+        self._input_fields = tuple(field_by_key(key) for key in derived.inputs)
         self._attr_native_unit_of_measurement = derived.unit
         if derived.device_class:
             self._attr_device_class = SensorDeviceClass(derived.device_class)
         if derived.state_class:
             self._attr_state_class = SensorStateClass(derived.state_class)
         self._attr_suggested_display_precision = derived.precision
+
+    @property
+    def available(self) -> bool:
+        """Unavailable if the coordinator itself is stale, OR any INPUT
+        field's own block has been reclassified UNSUPPORTED, OR any input
+        hasn't produced a value yet.
+
+        Mirrors `SrneFieldEntity.available`'s per-field narrowing
+        (`entity.py`'s own Fix round 1, Finding 4) -- required here
+        separately because a `Derived` is not a `Field` and this class does
+        not subclass `SrneFieldEntity`, so it inherits none of that
+        narrowing for free. Without this override, `coordinator._registers`
+        being cumulative (never purged for a block reclassified UNSUPPORTED
+        mid-poll -- coordinator.py's own Fix round 1, Finding 1) would let
+        this class keep computing e.g. `load_power_l1 + <frozen, no-longer-
+        updated load_power_l2>` forever after `load_power_l2`'s own block
+        stops answering: `load_power_l2`'s OWN sensor correctly goes
+        unavailable (via `SrneFieldEntity.available`), but `load_power_total`
+        would keep publishing a plausible-looking, silently wrong number --
+        exactly the failure class ("a confident wrong number on the
+        dashboard") this whole project exists to avoid.
+        """
+        if not super().available:
+            return False
+        support = self.coordinator.support
+        values = self.coordinator.data.values if self.coordinator.data else {}
+        for field in self._input_fields:
+            if support.get(field.block_addr) is BlockSupport.UNSUPPORTED:
+                return False
+            if field.key not in values:
+                return False
+        return True
 
     @property
     def native_value(self) -> object | None:
