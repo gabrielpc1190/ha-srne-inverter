@@ -5,7 +5,7 @@ description: "Integración custom de Home Assistant (`srne_inverter`) para inver
 production: true
 status: active
 stack: [python, home-assistant, pysolarmanv5, modbus, pytest]
-deploy: "Desplegado el 2026-09-14 en el HA de GADI (172.16.10.12): custom_components/srne_inverter copiado por tar sobre SSH a /config/custom_components/, `ha core restart` limpio, 2 config entries (Justice Inv 1/2) creadas por API REST, 174 entidades vivas. Vista Lovelace 'Inversores Justice' creada el mismo día."
+deploy: "Desplegado el 2026-09-14 en el HA de GADI (172.16.10.12), primero a mano (tar sobre SSH) y desde ese mismo día gestionado por HACS (repositorio custom, installed_version sigue el commit de `main`). 2 config entries (Justice Inv 1/2), 174 entidades vivas. Vista Lovelace 'Inversores Justice' creada el mismo día."
 repo: "git@github.com:gabrielpc1190/ha-srne-inverter.git"
 tags: [gadi, clientes, rowley, solar, home-assistant]
 related: ["Casa Justice (Main House)", "HomeAssistant", "inverter-bridge"]
@@ -130,8 +130,16 @@ existentes que hablan V5 con estos equipos: `Redes-Clientes/CasaJustice/tools/` 
 ## Convenciones
 
 - Código, identifiers, commits (Conventional Commits + `Co-Authored-By: Claude …`) en inglés; docs en español.
-- **Repo en GitHub privado desde el 2026-09-14**: `gabrielpc1190/ha-srne-inverter` (SSH, rama `main`), creado para
-  poder instalarlo por HACS como repositorio custom. Nunca push sin OK explícito de Gabriel, aunque el remoto ya
-  exista.
+- **Repo en GitHub PÚBLICO desde el 2026-09-14**: `gabrielpc1190/ha-srne-inverter` (SSH, rama `main`). Se creó
+  privado ese mismo día, pero el token OAuth que HACS trae de fábrica (device-flow, cliente `395a8e...`) **no
+  tiene ningún scope** y no puede ver repos privados de nadie — para que HACS instalara este repo como
+  repositorio custom había que darle a HACS un token con `repo` (alcance global de toda la instancia, no por
+  repo) o hacer público este repo. Gabriel eligió hacerlo público (2026-09-14): el código no tiene secretos
+  (revisado antes del primer push), a costa de exponer la topología de Casa Justice (IPs `192.168.188.x`,
+  seriales de los loggers Solarman) a quien vea el repo. Nunca push sin OK explícito de Gabriel, aunque el
+  remoto ya exista.
+- **Gestionado por HACS desde el 2026-09-14**: repositorio custom, categoría "Integración". Las actualizaciones
+  de código llegan actualizando el repositorio en HACS (Ajustes → HACS → esta integración → Redownload), no por
+  `tools/deploy_to_gadi.sh` — ese script queda como método de respaldo si HACS no está disponible.
 - `registers.py` y `transport/` **no importan `homeassistant`** (los usa también `tools/probe.py`).
 - Toda escritura a un inversor relee el registro y falla si no coincide. Nada de valores asumidos.
