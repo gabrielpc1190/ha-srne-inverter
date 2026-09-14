@@ -5,7 +5,7 @@ description: "Integración custom de Home Assistant (`srne_inverter`) para inver
 production: true
 status: active
 stack: [python, home-assistant, pysolarmanv5, modbus, pytest]
-deploy: "custom_components/srne_inverter → /config/custom_components/ del HA de GADI (172.16.10.12), `ha core restart`; código listo, revisado y probado contra hardware real — aún NO desplegado"
+deploy: "Desplegado el 2026-09-14 en el HA de GADI (172.16.10.12): custom_components/srne_inverter copiado por tar sobre SSH a /config/custom_components/, `ha core restart` limpio, 2 config entries (Justice Inv 1/2) creadas por API REST, 174 entidades vivas. Vista Lovelace 'Inversores Justice' creada el mismo día."
 repo: local-only
 tags: [gadi, clientes, rowley, solar, home-assistant]
 related: ["Casa Justice (Main House)", "HomeAssistant", "inverter-bridge"]
@@ -73,26 +73,43 @@ cruza subredes y sus perfiles no sondean capacidades por unidad. GADI (2 SunGold
     registro que habilita esas escrituras es **`E215`**, no el tipo de batería `E004`. Los umbrales existen para
     el caso de una batería que NO se comunica con el inversor, que Gabriel confirmó el 2026-09-14 que la
     integración debe soportar igual.
+- ✅ **Desplegada en el HA de GADI, 2026-09-14 (tarea 18)**: `custom_components/srne_inverter` copiado por `tar`
+  sobre SSH a `/config/custom_components/` (el shell Alpine del addon SSH de HA OS no tiene `rsync`), `ha core
+  restart` confirmado limpio (log: "We found a custom integration srne_inverter which has not been tested by
+  Home Assistant", sin traceback). Dos config entries creadas por API REST (`tools/add_justice_entries.py`):
+  "Justice Inv 1" y "Justice Inv 2", ambas `state: loaded`. **174 entidades verificadas vivas** con valores
+  coherentes (ej. `sensor.justice_inv_1_battery_soc = 99`, `select.justice_inv_1_output_priority = SUB`,
+  `sensor.justice_inv_1_grid_current_l2 = 12.6`).
+- ✅ **Vista Lovelace "Inversores Justice", 2026-09-14 (tarea 19)**: `tools/ha_add_justice_inverters_view.py`
+  creó la vista (`path: justice-inversores`) en el dashboard `dashboard-justice`, con backup previo a JSON. 8
+  badges, 2 columnas (una por inversor), 4 tarjetas cada una (Batería, Red y salida, Configuración, Estado de la
+  integración) más 2 history-graphs (SOC 24h, corriente de carga desde red 6h). Verificado por lectura del
+  config guardado — 0 entidades omitidas.
 - ✅ **Decisiones de Gabriel, 2026-09-14**: autorizó el despliegue (tarea 18), la vista Lovelace (tarea 19) y las
   escrituras de la prueba en vivo; y decidió que el repo puede pasar a **GitHub privado**
   (`gabrielpc1190/ha-srne-inverter`), lo que habilita instalar por HACS como repositorio custom. **Todavía no se
-  hizo** — nada se pushea sin OK explícito por separado (además del OK de "puede ir a GitHub").
-- ⬜ **Falta**: tarea 18 (desplegar al HA de GADI), tarea 19 (vista Lovelace) y tarea 20 (documentación del plan).
-  Hay una revisión del commit `a9e2795` en vuelo — mirar su veredicto antes de desplegar.
+  hizo** — nada se pushea sin OK explícito por separado (además del OK de "puede ir a GitHub"); es un caso
+  aparte, no parte de este plan.
+- ✅ **Plan de 20 tareas cerrado por completo, 2026-09-14** (software, prueba en vivo, despliegue, Lovelace y esta
+  documentación). La integración está en **operación normal**, no en desarrollo activo.
 
 ## Cómo retomar (línea de reentrada)
 
-> Abrí `/data/claude/ha-srne-inverter/CLAUDE.md`, el ledger
+> La integración está **en operación**, no en desarrollo: las 20 tareas del plan están cerradas (código, prueba
+> en vivo, despliegue a GADI, vista Lovelace, documentación). Para monitoreo normal no hay nada que retomar —
+> revisar la vista Lovelace "Inversores Justice" o las entidades `sensor.justice_inv_{1,2}_*` alcanza.
+>
+> **Pendiente real que queda**: inventariar los **6 inversores de Yoga** — barrido TCP 8899 en la VLAN IoT de
+> Yoga (router `10.45.14.59`) para levantar sus IPs y seriales, y después correr `tools/probe.py` contra cada
+> uno (ver el README, sección "inventariar unidades nuevas") antes de poder darlos de alta como config entries.
+> No hay fecha comprometida para esto.
+>
+> Si en el futuro hace falta tocar código de nuevo (un hallazgo de campo, un firmware distinto en Yoga, etc.),
+> arrancar por [`docs/evidence/2026-09-14_live-test-notes.md`](docs/evidence/2026-09-14_live-test-notes.md) y el
+> ledger histórico
 > [`.superpowers/sdd/2026-09-13-srne-inverter-integration/progress.md`](.superpowers/sdd/2026-09-13-srne-inverter-integration/progress.md)
-> y [`docs/evidence/2026-09-14_live-test-notes.md`](docs/evidence/2026-09-14_live-test-notes.md). Revisar el
-> veredicto pendiente sobre el commit `a9e2795` antes de tocar nada más. Luego, con las tres autorizaciones de
-> Gabriel ya dadas (despliegue, Lovelace, GitHub privado):
-> 1. **Tarea 18** — copiar `custom_components/srne_inverter` a `/config/custom_components/` del HA de GADI
->    (`172.16.10.12`, alias SSH `GADI-HomeAssistant`, ya tiene HACS y 11 integraciones personalizadas),
->    `ha core restart`, configurar las dos entradas (Justice inv1/inv2) desde la UI.
-> 2. **Tarea 19** — vista Lovelace "Inversores Justice".
-> 3. **Tarea 20** — documentación final del plan (README/HACS, no confundir con este CLAUDE.md).
-> Antes de reabrir cualquier prueba contra hardware real, matá los monitores que tengan abierto el logger:
+> (no editarlo, es registro histórico) para no repetir terreno ya pisado. Antes de reabrir cualquier prueba
+> contra hardware real, matá los monitores que tengan abierto el logger:
 > `for p in $(pgrep -f "justice_watc[h].py"); do kill $p; done` (cada logger Solarman acepta UN cliente TCP).
 > Tests con `.venv/bin/python -m pytest -q` (252 pruebas, ~394 s corridas en foreground — no backgroundear, un
 > agente ya perdió una corrida por matar el directorio de un pytest backgroundeado a medias).
