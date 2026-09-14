@@ -332,20 +332,46 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
         `tests/fake_transport.py`'s FakeTransport.atomic() docstring says
         Task 7 should ("This is what lets Task 7/12/15 test a
         write-plus-read-back bracket against this fake").
+
+        Task 15 fix round 1: the write phase and the read-back phase used to
+        share ONE except clause and ONE message ("write to 0x... failed:
+        ..."), for both. Measured consequence: if the logger drops the
+        session during WRITE_SETTLE -- after the device already accepted
+        and stored the write, before the read-back could confirm it -- the
+        register genuinely holds the new value while the user is told the
+        WRITE failed. On a client's production inverter the natural next
+        move (retry, or assume the old value is still in effect and act on
+        that) is wrong either way. The two phases are now caught
+        separately, with messages that say which one actually happened.
         """
         if not self._connection_enabled:
             raise HomeAssistantError("the connection to this inverter is disabled")
-        try:
-            if not self.transport.connected:
+        if not self.transport.connected:
+            try:
                 await self.transport.connect()
-            async with self.transport.atomic() as locked:
+            except TransportError as err:
+                raise HomeAssistantError(
+                    f"write to 0x{address:04X} failed before reaching the "
+                    f"device (could not connect): {type(err).__name__}: {err}"
+                ) from err
+        async with self.transport.atomic() as locked:
+            try:
                 await locked.write_holding(address, raw)
-                await asyncio.sleep(WRITE_SETTLE)
+            except TransportError as err:
+                raise HomeAssistantError(
+                    f"write to 0x{address:04X} failed before reaching the "
+                    f"device: {type(err).__name__}: {err}"
+                ) from err
+            await asyncio.sleep(WRITE_SETTLE)
+            try:
                 read_back = (await locked.read_holding(address, 1))[0]
-        except TransportError as err:
-            raise HomeAssistantError(
-                f"write to 0x{address:04X} failed: {type(err).__name__}: {err}"
-            ) from err
+            except TransportError as err:
+                raise HomeAssistantError(
+                    f"wrote 0x{address:04X}={raw}, but could not confirm it "
+                    f"stuck (read-back failed: {type(err).__name__}: {err}) "
+                    "-- the write itself may have already reached the "
+                    "device; re-read the register before assuming it did not"
+                ) from err
 
         if read_back != raw:
             raise HomeAssistantError(

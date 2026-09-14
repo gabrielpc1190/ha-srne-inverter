@@ -33,6 +33,7 @@ apply to every write, in order:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -44,7 +45,7 @@ from homeassistant.core import (
     SupportsResponse,
     callback,
 )
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 
 from .button import async_reprobe
@@ -54,6 +55,8 @@ from .const import (
     SERVICE_REPROBE,
     SERVICE_WRITE_REGISTER,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 ATTR_DEVICE_ID = "device_id"
 ATTR_ADDRESS = "address"
@@ -89,12 +92,41 @@ KNOWN_ABSENT_ON_THIS_FIRMWARE: tuple[range, ...] = (
 KNOWN_WRITE_REJECTED: frozenset[int] = frozenset({0xE20F, 0xE20B, 0xE21D, 0xE039})
 
 
+def _strict_int(value: Any) -> int:
+    """Coerce to a whole number without `vol.Coerce(int)`'s two surprises,
+    for a service whose entire point is sending the EXACT value asked for:
+
+    - `vol.Coerce(int)` silently TRUNCATES a float (`int(16.7) == 16`) --
+      a typo'd `16.7` would silently become a different, plausible-looking
+      register value with no error at all.
+    - Python's `bool` is an `int` subclass, so `vol.Coerce(int)` (and a bare
+      `isinstance(value, int)` check) accepts `True`/`False` as `1`/`0` --
+      e.g. a YAML automation with `address: yes` (parsed as boolean `True`
+      by the YAML loader) would silently target register `0x0001`.
+
+    Accepts a real `int` (not `bool`), a whole-number `float` (`16.0` is
+    fine, `16.7` is not), or a string in base 0 (`"256"`, `"0x0100"`,
+    `"0o400"` all work, same as the previous `_address`-only hex support).
+    """
+    if isinstance(value, bool):
+        raise vol.Invalid(f"expected a whole number, got a boolean: {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise vol.Invalid(
+                f"expected a whole number, got a fractional value: {value!r}"
+            )
+        return int(value)
+    try:
+        return int(str(value), 0)
+    except ValueError:
+        raise vol.Invalid(f"expected a whole number, got: {value!r}") from None
+
+
 def _address(value: Any) -> int:
     """Accept 256, '256' or '0x0100'."""
-    if isinstance(value, int):
-        parsed = value
-    else:
-        parsed = int(str(value), 0)
+    parsed = _strict_int(value)
     if not 0 <= parsed <= 0xFFFF:
         raise vol.Invalid(f"register address out of range: {value}")
     return parsed
@@ -105,7 +137,7 @@ READ_SCHEMA = vol.Schema(
         vol.Required(ATTR_DEVICE_ID): cv.string,
         vol.Required(ATTR_ADDRESS): _address,
         vol.Optional(ATTR_COUNT, default=1): vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=64)
+            _strict_int, vol.Range(min=1, max=64)
         ),
     }
 )
@@ -113,7 +145,7 @@ WRITE_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_DEVICE_ID): cv.string,
         vol.Required(ATTR_ADDRESS): _address,
-        vol.Required(ATTR_VALUE): vol.All(vol.Coerce(int), vol.Range(min=0, max=0xFFFF)),
+        vol.Required(ATTR_VALUE): vol.All(_strict_int, vol.Range(min=0, max=0xFFFF)),
     }
 )
 REPROBE_SCHEMA = vol.Schema({vol.Required(ATTR_DEVICE_ID): cv.string})
@@ -207,11 +239,36 @@ def async_setup_services(hass: HomeAssistant) -> None:
         return {"address": f"0x{address:04X}", "values": values}
 
     async def handle_write(call: ServiceCall) -> ServiceResponse:
-        entry = _entry_for_device(hass, call.data[ATTR_DEVICE_ID])
+        # Fix round 1: this write path had NO logging at all -- default
+        # INFO level (production's normal level) recorded zero trace of a
+        # raw register write, for a service whose entire purpose is doing
+        # things no entity, and therefore no normal HA state-change history,
+        # will let you do. "What changed on the inverter last night?" was
+        # unanswerable. Logged at INFO (not DEBUG): this is the whole reason
+        # the service exists, not routine chatter.
+        device_id = call.data[ATTR_DEVICE_ID]
         address = call.data[ATTR_ADDRESS]
         value = call.data[ATTR_VALUE]
-        _refuse_known_unwritable(address)
-        read_back = await entry.runtime_data.coordinator.async_write_raw(address, value)
+        entry = _entry_for_device(hass, device_id)
+        _LOGGER.info(
+            "write_register: %s (device_id=%s) 0x%04X <- %s",
+            entry.title, device_id, address, value,
+        )
+        try:
+            _refuse_known_unwritable(address)
+            read_back = await entry.runtime_data.coordinator.async_write_raw(
+                address, value
+            )
+        except HomeAssistantError as err:
+            _LOGGER.info(
+                "write_register: %s 0x%04X <- %s FAILED: %s",
+                entry.title, address, value, err,
+            )
+            raise
+        _LOGGER.info(
+            "write_register: %s 0x%04X <- %s OK (read back %s)",
+            entry.title, address, value, read_back,
+        )
         return {
             "address": f"0x{address:04X}",
             "written": value,
