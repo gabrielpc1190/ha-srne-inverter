@@ -124,16 +124,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: SrneConfigEntry) -> bool
         await coordinator.async_probe()
     except TransportError as err:
         # coordinator.async_probe() already closes the transport itself on a
-        # ProbeFailedError (its own Fix round 1, Finding 12); this call is
-        # still here, unconditionally, for the OTHER TransportError shape --
-        # connect() itself failing (e.g. TransportBusyError from the wrong
-        # slave id / another client holding the logger) is raised from
-        # async_probe() before its own try/except around probe() is ever
-        # reached, so nothing upstream has closed anything yet. close() is
-        # idempotent either way.
+        # ProbeFailedError (its own Fix round 1, Finding 12) -- the case
+        # where every block ends UNSUPPORTED/UNKNOWN, e.g. this site's own
+        # confusable `.240`/slave 1 vs. `.242`/slave 2 pair: connect()
+        # succeeds fine there, and it is probe() itself that fails. This
+        # `await transport.close()` is still here, unconditionally, for the
+        # OTHER TransportError shape -- connect() itself failing (refused,
+        # unreachable, or another client's TCP session already occupying
+        # the logger's one slot; Task 4's phase-aware translate() maps EVERY
+        # connect-phase NoSocketAvailableError to plain
+        # TransportConnectionError, never TransportBusyError, which is
+        # reserved for an ESTABLISHED session discovered stolen during a
+        # later read/write) is raised from async_probe() before its own
+        # try/except around probe() is ever reached, so nothing upstream has
+        # closed anything yet in that case. close() is idempotent either
+        # way. Surfacing `type(err).__name__` (not just `str(err)`) matters:
+        # it is how the config entry's own SETUP_RETRY reason can be told
+        # apart from "the inverter isn't replying" without enabling debug
+        # logging -- Task 7 already keeps this distinction in its own
+        # UpdateFailed message, for the same reason.
         await transport.close()
         raise ConfigEntryNotReady(
-            f"cannot probe {entry.data[CONF_HOST]}: {err}"
+            f"cannot probe {entry.data[CONF_HOST]}: {type(err).__name__}: {err}"
         ) from err
 
     entry.runtime_data = SrneRuntimeData(coordinator=coordinator, transport=transport)
@@ -147,6 +159,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: SrneConfigEntry) -> bool
     await coordinator.async_config_entry_first_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # This entry now has an update listener. Task 13's options flow MUST use
+    # a plain `OptionsFlow`, never `OptionsFlowWithReload` -- HA 2026.9
+    # raises `ValueError("Config entry update listeners should not be used
+    # with OptionsFlowWithReload")` from `async_finish_flow` (verified
+    # against the installed config_entries.py) the instant an entry with
+    # ANY update listener completes such a flow. `async_reload_entry` below
+    # already does the reload this integration needs.
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
 
