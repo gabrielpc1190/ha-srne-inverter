@@ -10,6 +10,8 @@ fallback.
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.number import (
     NumberDeviceClass,
     NumberEntity,
@@ -21,6 +23,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import SrneConfigEntry
 from .entity import SrneFieldEntity, async_setup_field_platform
 from .registers import FIELDS, Field, FieldKind
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -38,9 +42,23 @@ async def async_setup_entry(
         for field in FIELDS:
             if field.write is None or field.kind is FieldKind.ENUM:
                 continue
-            if field.key not in supported or f"number:{field.key}" in added:
+            if field.key not in supported:
                 continue
-            added.add(f"number:{field.key}")
+            entity_key = f"number:{field.key}"
+            if entity_key in added:
+                # Fix round 1 (Opus review): mirrors sensor.py's own Fix
+                # round 2 (commit ce62625) -- this branch used to have no
+                # signal of its own, so a test proving "a re-probe with
+                # nothing newly supported adds zero new entities" was
+                # actually proving HA's own entity registry rejects a
+                # second entity with an already-registered unique_id
+                # ("Platform srne_inverter does not generate unique
+                # IDs... already exists - ignoring"), not that THIS guard
+                # ever ran. A debug line naming the skipped key gives this
+                # branch its own observable.
+                _LOGGER.debug("%s already added, skipping re-probe rebuild", entity_key)
+                continue
+            added.add(entity_key)
             new.append(SrneNumber(coordinator, entry, field))
         return new
 
