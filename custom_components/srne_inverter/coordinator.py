@@ -17,7 +17,12 @@ from . import registers as R
 from .const import BACKOFF_SECONDS, BLOCK_PAUSE, DOMAIN, REPROBE_AFTER_FAILURES, WRITE_SETTLE
 from .probe import BlockSupport, ProbeFailedError, ProbeResult, probe
 from .registers import BlockTier, Field
-from .transport.base import Transport, TransportError, UnsupportedRegisterError
+from .transport.base import (
+    InvalidRegisterValueError,
+    Transport,
+    TransportError,
+    UnsupportedRegisterError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -357,6 +362,14 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
         async with self.transport.atomic() as locked:
             try:
                 await locked.write_holding(address, raw)
+            except InvalidRegisterValueError as err:
+                raise HomeAssistantError(
+                    f"0x{address:04X}: the device rejected the write ({err}) "
+                    "-- this reached the device and was refused, it is not a "
+                    "communication failure (a known cause: writes to "
+                    "equalize/boost/float voltage are refused while BMS "
+                    "communication is active)"
+                ) from err
             except TransportError as err:
                 raise HomeAssistantError(
                     f"write to 0x{address:04X} failed before reaching the "
