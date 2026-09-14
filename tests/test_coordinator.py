@@ -542,9 +542,27 @@ async def test_disabling_the_connection_closes_and_stops_polling(
     assert transport.connected is False
     assert coordinator.update_interval is None
     transport.reads.clear()
+    connect_count_before_stray_tick = transport.connect_count
     await coordinator.async_refresh()
     assert transport.reads == []
     assert coordinator.last_update_success is False
+    # Fix round 1 (Task 12 review, Finding 5): `reads == []` alone only
+    # proves `_read_due_blocks()` never ran -- it says nothing about
+    # whether `transport.connect()` ran first. Moving
+    # `_async_update_data`'s `if not self._connection_enabled: raise
+    # UpdateFailed(...)` guard to AFTER the `if not self.transport.
+    # connected: await self.transport.connect()` line above it would leave
+    # `reads == []` true (the moved guard would still raise UpdateFailed
+    # before `_read_due_blocks()` is ever reached) while silently
+    # reconnecting the transport first -- handing the logger's one TCP
+    # slot right back the instant a stray, already-scheduled HA tick fires
+    # (`update_interval = None` does not cancel one already in flight; see
+    # `SrneCoordinator`'s own "Connection toggle" docstring), the exact
+    # thing disabling the connection exists to prevent. Confirmed by hand:
+    # with the guard moved, this assertion pair goes red while `reads ==
+    # []` above stays green.
+    assert transport.connected is False
+    assert transport.connect_count == connect_count_before_stray_tick
 
     await coordinator.async_set_connection_enabled(True)
     assert coordinator.update_interval == timedelta(seconds=10)

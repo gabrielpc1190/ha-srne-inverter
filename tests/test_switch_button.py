@@ -37,6 +37,12 @@ registers were never removed from `transport.registers` in the first place
 never filtered), so nothing needs to be added back.
 """
 
+import asyncio
+import time
+
+import pytest
+from homeassistant.exceptions import HomeAssistantError
+
 from custom_components.srne_inverter import registers as R
 from tests.fake_transport import DEFAULT_UNSUPPORTED, FakeTransport
 from tests.test_init import setup_entry
@@ -156,3 +162,181 @@ async def test_reprobe_adds_entities_that_appeared(
     state = hass.states.get("sensor.justice_inv_1_total_running_days")
     assert state is not None
     assert state.state != "unavailable"
+
+
+# ---- Fix round 1 (Opus review, task-12-review.md) --------------------------
+#
+# Five findings, all Important. Items 1-4 are genuine defects in the
+# original switch.py/button.py/coordinator.py; item 5 is a coverage gap
+# (the coordinator's own pause-vs-connect ordering was already correct, but
+# nothing in the suite would have noticed if it regressed). See this task's
+# report ("Fix round 1" section) for the falsifiability transcript of each.
+
+
+async def test_reprobe_button_refuses_while_paused(
+    hass, justice_registers_synthetic_complete, enable_custom_integrations
+):
+    """Finding 1: `async_reprobe` used to ignore `coordinator.
+    connection_enabled` entirely -- `coordinator.async_probe()` has no idea
+    the user paused anything and happily calls `transport.connect()`
+    regardless. Measured without the guard: pressing reprobe while paused
+    silently reopened the logger (10 reads, `transport.connected` back to
+    `True`) while the switch itself kept reading "off" and nothing ever
+    closed the transport again afterward -- precisely the betrayal this
+    switch exists to prevent (Gabriel pauses to hand the logger to
+    `tools/probe.py`/`justice_watch.py`, and finds it still held). Pins
+    that the button now refuses cleanly instead, and that refusing leaves
+    the transport exactly as it was.
+    """
+    transport = FakeTransport(justice_registers_synthetic_complete)
+    await setup_entry(hass, transport)
+    await hass.services.async_call(
+        "switch", "turn_off",
+        {"entity_id": "switch.justice_inv_1_connection"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert transport.connected is False
+    connect_count_before = transport.connect_count
+    reads_before = list(transport.reads)
+
+    with pytest.raises(HomeAssistantError, match="paused"):
+        await hass.services.async_call(
+            "button", "press",
+            {"entity_id": "button.justice_inv_1_reprobe"}, blocking=True,
+        )
+    await hass.async_block_till_done()
+
+    assert transport.connected is False
+    assert transport.connect_count == connect_count_before
+    assert transport.reads == reads_before
+    assert hass.states.get("switch.justice_inv_1_connection").state == "off"
+
+
+async def test_reprobe_button_stays_available_while_paused(
+    hass, justice_registers_synthetic_complete, enable_custom_integrations
+):
+    """Finding 2: the button used to inherit `CoordinatorEntity.available`
+    (`coordinator.last_update_success`), so it went `unavailable` the
+    instant the connection was paused -- exactly the moment a user is most
+    likely to reach for it (to hand the logger to another tool, or to
+    check whether it is safe to take back). Measured consequence: `HA`'s
+    own service-call target resolution
+    (`homeassistant/helpers/service.py`) silently drops an unavailable
+    entity before the platform's `async_press` is ever reached -- a
+    WARNING logged, nothing else, no exception a caller could act on. The
+    override that fixes this (`return True`, same shape as the switch's
+    own) defends the OTHER staleness cause named by this same finding
+    (any backoff window) identically, since both flow through the same
+    `coordinator.last_update_success` flag this override no longer reads.
+    """
+    transport = FakeTransport(justice_registers_synthetic_complete)
+    await setup_entry(hass, transport)
+    await hass.services.async_call(
+        "switch", "turn_off",
+        {"entity_id": "switch.justice_inv_1_connection"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    state = hass.states.get("button.justice_inv_1_reprobe")
+    assert state.state != "unavailable"
+
+
+async def test_turning_the_switch_off_returns_without_waiting_for_teardown(
+    hass, justice_registers_synthetic_complete, enable_custom_integrations
+):
+    """Finding 3: `async_turn_off` used to `await` the coordinator's
+    `async_set_connection_enabled(False)` call in full, and that call
+    itself used to `await transport.close()` directly -- on the real
+    transport, up to ~14 s under lock contention (a 10 s connect plus two
+    2 s teardown windows). The service call (this test's own
+    `hass.services.async_call(..., blocking=True)`) therefore used to sit
+    there for the same duration before returning, contradicting Task 7's
+    own contract for this method and this file's own prior docstring
+    claim that the switch reads "off" immediately.
+
+    Injects the same technique the reviewer used to measure the original
+    bug: wraps the fake's own `close()` with an artificial delay, then
+    asserts the SERVICE CALL itself returns in well under that delay --
+    proving the teardown genuinely no longer blocks this call's own
+    caller. `await hass.async_block_till_done()` afterward is what waits
+    for the now-background close to actually finish (HA's own semantics:
+    it drains every task the coordinator scheduled via the config entry's
+    task-tracking API, not just the ones a caller explicitly awaited).
+    """
+    transport = FakeTransport(justice_registers_synthetic_complete)
+    await setup_entry(hass, transport)
+    real_close = transport.close
+
+    async def slow_close() -> None:
+        await asyncio.sleep(3.0)
+        await real_close()
+
+    transport.close = slow_close
+
+    start = time.monotonic()
+    await hass.services.async_call(
+        "switch", "turn_off",
+        {"entity_id": "switch.justice_inv_1_connection"}, blocking=True,
+    )
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0, f"turn_off blocked for {elapsed:.2f}s waiting on teardown"
+    assert hass.states.get("switch.justice_inv_1_connection").state == "off"
+
+    # The teardown did still happen -- just not on this call's own critical
+    # path. Wait for it explicitly before trusting `transport.connected`.
+    await hass.async_block_till_done()
+    assert transport.connected is False
+
+
+async def test_turning_on_while_a_previous_close_is_still_in_flight_reconnects(
+    hass, justice_registers_synthetic_complete, enable_custom_integrations
+):
+    """Finding 4: with no coordination between the two, a `turn_on` landing
+    while a just-issued `turn_off`'s own background close() is still
+    tearing down used to race it on the transport's single shared lock.
+    The transport's own close-generation latch (`transport/base.py`'s
+    `Transport.connect()` docstring) exists to stop a STALE, already-
+    queued `connect()` from reopening a logger the user just explicitly
+    closed -- but it cannot distinguish that from a fresh, legitimate
+    reconnect that merely started while the close was still running:
+    either way the epoch changes underneath it and it silently aborts.
+    Measured without `async_set_connection_enabled`'s fix (await any
+    pending `self._close_task` before reconnecting): switch left reading
+    "on", `transport.connected` stuck `False`, `connect_count` never
+    incremented, one failure booked, every data entity stuck unavailable,
+    NOTHING logged -- recovering only at the next scheduled tick.
+
+    Injects the same artificial close delay as the test above, but this
+    time calls `turn_on` immediately after `turn_off`'s own (now-fast)
+    return, with no `hass.async_block_till_done()` in between -- so the
+    background close from `turn_off` is still genuinely running when
+    `turn_on` starts.
+    """
+    transport = FakeTransport(justice_registers_synthetic_complete)
+    entry = await setup_entry(hass, transport)
+    coordinator = entry.runtime_data.coordinator
+    real_close = transport.close
+
+    async def slow_close() -> None:
+        await asyncio.sleep(1.0)
+        await real_close()
+
+    transport.close = slow_close
+
+    await hass.services.async_call(
+        "switch", "turn_off",
+        {"entity_id": "switch.justice_inv_1_connection"}, blocking=True,
+    )
+    # turn_off's own service call already returned (per the test above),
+    # but its background close() is still running (1 s injected delay) --
+    # fire turn_on right now, racing it for real, not just in theory.
+    await hass.services.async_call(
+        "switch", "turn_on",
+        {"entity_id": "switch.justice_inv_1_connection"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get("switch.justice_inv_1_connection").state == "on"
+    assert transport.connected is True
+    assert coordinator.last_update_success is True
+    assert coordinator.failure_count == 0

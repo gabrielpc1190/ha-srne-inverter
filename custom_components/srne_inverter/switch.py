@@ -18,6 +18,19 @@ from . import SrneConfigEntry
 from .coordinator import SrneCoordinator
 from .entity import SrneEntity
 
+# Fix round 1 (Task 12 review, Finding 4): defense in depth alongside
+# coordinator.async_set_connection_enabled's own await-the-pending-close-
+# task fix (see coordinator.py) -- that fix is what makes a genuine
+# turn_on-during-teardown race resolve correctly rather than silently
+# wedge, but nothing stopped HA from dispatching a SECOND async_turn_on/
+# async_turn_off call into this entity while a first one is still
+# in-flight in the first place. HA's own `PARALLEL_UPDATES` module
+# constant limits how many of THIS platform's own service-call handlers
+# (async_turn_on/async_turn_off) may be in flight at once; `1` means the
+# second call simply waits its turn instead of running concurrently with
+# the first.
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -95,11 +108,25 @@ class SrneConnectionSwitch(SrneEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Pause polling and free the logger's one TCP slot.
 
-        `async_set_connection_enabled(False)` sets the paused flag BEFORE
-        awaiting `transport.close()` (its own docstring: close() on the
-        real transport can take up to ~14 s under lock contention) -- this
-        call does not add any further blocking of its own on top of that;
-        it simply awaits the coordinator's own call and writes state.
+        Fix round 1 (Task 12 review, Finding 3): this docstring used to
+        claim the entity reads "off" immediately because this call "does
+        not add any further blocking of its own" on top of the
+        coordinator's own await -- that was wrong. Before this fix round,
+        `async_set_connection_enabled(False)` itself `await`ed
+        `transport.close()` directly, so THIS call (an HA service call
+        under `blocking=True`) sat there for however long that teardown
+        took -- up to ~14 s on the real transport under lock contention --
+        before returning, and the entity's own state stayed whatever it
+        was until then. `async_set_connection_enabled` now schedules that
+        close as a tracked background task instead of awaiting it inline
+        (see its own docstring in `coordinator.py`), so THIS call returns
+        as soon as the flag is flipped and the affected entities are
+        marked unavailable -- genuinely fast, not just documented as such.
+        `async_write_ha_state()` still runs immediately after, so the
+        switch itself reads "off" the instant this service call returns,
+        while the actual teardown finishes separately in the background
+        (observable in a test via `await hass.async_block_till_done()`,
+        which waits for that tracked task too).
         """
         await self.coordinator.async_set_connection_enabled(False)
         self.async_write_ha_state()

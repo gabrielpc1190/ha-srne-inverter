@@ -48,6 +48,23 @@ class SrneReprobeButton(SrneEntity, ButtonEntity):
     def __init__(self, coordinator: SrneCoordinator, entry: SrneConfigEntry) -> None:
         super().__init__(coordinator, entry, "reprobe", "Reprobe")
 
+    @property
+    def available(self) -> bool:
+        """Always available, for the same reason as `SrneConnectionSwitch.
+        available` (`switch.py`): inheriting `CoordinatorEntity.available`
+        (`coordinator.last_update_success`) would make this button
+        unavailable during the exact two situations a user is most likely
+        to want it -- right after a failed poll (any backoff window) or
+        while the connection is deliberately paused (Fix round 1, Task 12
+        review, Finding 2). Measured consequence of NOT overriding this:
+        `button.press` on an unavailable entity is a silent no-op inside
+        Home Assistant's own service-call machinery (`helpers/service.py`'s
+        target resolution drops unavailable entities before the platform's
+        own `async_press` is ever called) -- one WARNING line in the log
+        and nothing else, at the moment a re-probe is most wanted.
+        """
+        return True
+
     async def async_press(self) -> None:
         await async_reprobe(self.hass, self._entry)
 
@@ -55,8 +72,11 @@ class SrneReprobeButton(SrneEntity, ButtonEntity):
 async def async_reprobe(hass: HomeAssistant, entry: SrneConfigEntry) -> dict[str, str]:
     """Re-probe the unit and tell every platform to add what appeared.
 
-    Three steps, in order, each already established by the coordinator this
-    task consumes rather than reimplements:
+    A guard, then three steps, in order:
+
+    0. Refuses outright if `coordinator.connection_enabled` is `False`
+       (Fix round 1, Finding 1) -- see the guard's own comment below for
+       why this lives here rather than inside `SrneCoordinator.async_probe`.
 
     1. `coordinator.async_probe()` -- reconnects if needed and re-reads
        every declared block from scratch, replacing `coordinator.
@@ -101,6 +121,26 @@ async def async_reprobe(hass: HomeAssistant, entry: SrneConfigEntry) -> dict[str
     already-awaited result of ITS OWN probe pass.
     """
     coordinator = entry.runtime_data.coordinator
+    if not coordinator.connection_enabled:
+        # Fix round 1 (Task 12 review, Finding 1, Important): async_probe()
+        # itself has no idea the user paused the connection -- it happily
+        # calls transport.connect() if the transport is not already
+        # connected, same as any other caller. Measured without this
+        # guard: pressing reprobe while paused reopened the logger (10
+        # reads, transport.connected True) while the switch still read
+        # "off" and nothing ever closed it again -- exactly the betrayal
+        # this switch exists to prevent (Gabriel pauses, goes to run
+        # tools/probe.py or justice_watch.py, and finds the logger's one
+        # TCP slot taken by the integration he just told to let go of it).
+        # `async_reprobe` is the ONE shared entry point both this button
+        # and Task 15's future `reprobe` service will call -- fixing it
+        # here, not inside `SrneCoordinator.async_probe()` itself, keeps
+        # the guard exactly where every current and future caller of a
+        # user-triggered reprobe already goes through.
+        raise HomeAssistantError(
+            "cannot reprobe while the connection is paused -- turn the "
+            "connection switch back on first"
+        )
     try:
         result = await coordinator.async_probe()
     except TransportError as err:
