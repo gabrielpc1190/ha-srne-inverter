@@ -20,7 +20,17 @@ found by re-review with a mutation battery. Additional tests pin:
     address `registers.BLOCKS` declares present
   - writes are exactly as loud as reads about an address nothing knows
     anything about (both raise LookupError, not just reads)
+
+Fix round 2 (task 4, re-review, 2026-09-13): `atomic()` (Task 4's Finding 1
+fix shape) was added to the Transport Protocol and to this fake so Tasks
+7/12/15 can test a write-plus-read-back bracket against it, not only against
+the real transport. Additional tests pin:
+  - atomic() genuinely serialises against a concurrent plain read/write --
+    it must not be a no-op context manager that returns self
+  - the handle atomic() yields is invalidated the instant its block exits
 """
+
+import asyncio
 
 import pytest
 
@@ -442,3 +452,49 @@ async def test_synthetic_complete_fixture_covers_every_declared_block(
     for block in BLOCKS:
         values = await transport.read_holding(block.addr, block.count)
         assert len(values) == block.count
+
+
+# --- atomic() ----------------------------------------------------------
+
+
+async def test_atomic_serialises_against_a_concurrent_plain_read(justice_registers):
+    """Task 4 fix round 2, Finding 1: FakeTransport's atomic() must
+    genuinely serialise against read_holding/write_holding -- not be a
+    no-op context manager that returns self -- or a Task 12 test asserting
+    a write+read-back bracket against this fake would prove nothing.
+    """
+    transport = FakeTransport(justice_registers)
+    await transport.connect()
+    order: list[str] = []
+    atomic_started = asyncio.Event()
+
+    async def do_atomic():
+        async with transport.atomic() as t:
+            order.append("atomic-start")
+            atomic_started.set()
+            await asyncio.sleep(0.02)
+            await t.write_holding(0x0100, 1)
+            order.append("atomic-end")
+
+    async def do_read():
+        await atomic_started.wait()
+        await transport.read_holding(0x0100, 1)
+        order.append("read-done")
+
+    await asyncio.gather(do_atomic(), do_read())
+    assert order == ["atomic-start", "atomic-end", "read-done"]
+
+
+async def test_atomic_handle_is_invalidated_after_the_block_exits(justice_registers):
+    """Same invalidation requirement as the real transport's atomic() --
+    using the handle after its block has exited must raise RuntimeError
+    rather than silently running outside the lock.
+    """
+    transport = FakeTransport(justice_registers)
+    await transport.connect()
+    async with transport.atomic() as t:
+        await t.read_holding(0x0100, 1)
+    with pytest.raises(RuntimeError):
+        await t.read_holding(0x0100, 1)
+    with pytest.raises(RuntimeError):
+        await t.write_holding(0x0100, 1)

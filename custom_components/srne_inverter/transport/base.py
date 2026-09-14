@@ -8,6 +8,7 @@ THIS MODULE MUST NOT IMPORT homeassistant.
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from typing import Protocol, runtime_checkable
 
 
@@ -113,4 +114,60 @@ class Transport(Protocol):
         value stuck. Callers that need certainty must read_holding the same
         register back afterward; this method never does that on their
         behalf.
+        """
+
+    def atomic(self) -> AbstractAsyncContextManager[AtomicOperations]:
+        """Hold the transport exclusively for more than one operation.
+
+        A plain `read_holding`/`write_holding` each acquire the transport's
+        lock for a single operation and release it before returning -- that
+        is enough for one-shot calls, but NOT enough for a caller that needs
+        a write followed by its own read-back to happen as one unit (e.g. the
+        repo-wide "every write re-reads and raises if it differs" invariant;
+        the compare-and-raise itself still belongs to the caller, never to
+        write_holding). `atomic()` is that unit:
+
+            async with transport.atomic() as t:
+                await t.write_holding(addr, value)
+                readback = await t.read_holding(addr, 1)
+                if readback != [value]:
+                    raise InvalidRegisterValueError("write did not stick")
+
+        Implementations MUST:
+        - serialise `atomic()` against read_holding/write_holding AND against
+          a second, concurrent `atomic()` -- it is the SAME lock, not an
+          independent one that would let something else interleave mid-block;
+        - never leak the lock, whether the block exits normally, raises, or
+          is cancelled mid-flight;
+        - invalidate the yielded object once the block exits: calling its
+          read_holding/write_holding afterward MUST raise RuntimeError rather
+          than silently operating outside the lock (a caller that stashes the
+          handle and uses it later is exactly the bug this requirement
+          exists to catch).
+
+        Do NOT call the transport's own public read_holding/write_holding
+        from inside an `atomic()` block on the same task -- both acquire the
+        same non-reentrant lock this context manager already holds, so doing
+        so deadlocks. Use the object this method yields instead; it exposes
+        read_holding/write_holding that reuse the lock already held.
+        """
+
+
+@runtime_checkable
+class AtomicOperations(Protocol):
+    """What `atomic()` yields: read/write access for the lifetime of the
+    `async with transport.atomic() as t:` block that produced it.
+
+    Using `t` after that block has exited must raise RuntimeError -- see
+    `Transport.atomic`'s docstring.
+    """
+
+    async def read_holding(self, addr: int, count: int) -> list[int]:
+        """Same contract as Transport.read_holding, without re-acquiring the
+        lock -- the enclosing atomic() block already holds it.
+        """
+
+    async def write_holding(self, addr: int, value: int) -> None:
+        """Same contract as Transport.write_holding, without re-acquiring the
+        lock -- the enclosing atomic() block already holds it.
         """

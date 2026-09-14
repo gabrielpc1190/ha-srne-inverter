@@ -1,7 +1,7 @@
 """The Solarman V5 transport maps library errors onto our taxonomy."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pysolarmanv5 import NoSocketAvailableError, V5FrameError
@@ -22,6 +22,24 @@ from custom_components.srne_inverter.transport.solarman_v5 import (
 TARGET = "custom_components.srne_inverter.transport.solarman_v5.PySolarmanV5Async"
 
 
+def _live_reader_task() -> MagicMock:
+    """A plain (non-async) stand-in for asyncio.Task.
+
+    `reader_task` on the real PySolarmanV5Async is a genuine asyncio.Task,
+    whose `.done()` is a SYNCHRONOUS method. Leaving it as the default
+    auto-attribute on an AsyncMock/MagicMock-based client is a trap:
+    `client.reader_task` would be a truthy mock, and `.done()` on THAT would
+    return another truthy mock (or, on an AsyncMock, an unawaited coroutine)
+    -- both read as "done" under `if ...: return False` in `connected`,
+    making every connected client look dead. This gives each fixture client
+    a `reader_task` whose `.done()` returns a real `False`, matching a
+    healthy, still-running reader loop.
+    """
+    task = MagicMock()
+    task.done.return_value = False
+    return task
+
+
 @pytest.fixture(name="factory")
 def factory_fixture():
     with patch(TARGET) as factory:
@@ -30,6 +48,7 @@ def factory_fixture():
         client.disconnect = AsyncMock()
         client.read_holding_registers = AsyncMock(return_value=[1, 2, 3])
         client.write_holding_register = AsyncMock(return_value=7)
+        client.reader_task = _live_reader_task()
         yield factory
 
 
@@ -304,8 +323,10 @@ async def test_connect_rebuilds_a_dead_session_instead_of_a_silent_no_op():
     first = AsyncMock()
     first.connect = AsyncMock()
     first.disconnect = AsyncMock()
+    first.reader_task = _live_reader_task()
     second = AsyncMock()
     second.connect = AsyncMock()
+    second.reader_task = _live_reader_task()
 
     with patch(TARGET, side_effect=[first, second]):
         transport = SolarmanV5Transport("h", 1)
@@ -371,3 +392,276 @@ async def test_close_waits_for_an_in_flight_read_before_disconnecting(client):
     await asyncio.gather(transport.read_holding(0x0100, 1), do_close())
     assert order == ["read-start", "close-start", "read-end", "close-end"]
     assert transport.connected is False
+
+
+# --- Fix round 2 (re-review): atomic() handle invalidation, connect()/close()
+# races, bounded discard, cause preservation, and the reader-task death mode
+# _conn_keeper's own tail misses. -----------------------------------------
+
+
+async def test_atomic_handle_is_invalidated_after_the_block_exits(client):
+    """Finding 2 (re-review): the object atomic() yields must stop working
+    the instant the block exits. Before this fix, a caller that stashed the
+    handle (or a helper that returned it) could keep calling read_holding/
+    write_holding through it afterward, completely outside the lock -- e.g.
+    a write executed in the middle of an unrelated in-flight read, on a
+    client whose data_queue holds exactly one response.
+    """
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+    async with transport.atomic() as t:
+        await t.write_holding(0x0100, 1)
+    with pytest.raises(RuntimeError):
+        await t.write_holding(0x0100, 2)
+    with pytest.raises(RuntimeError):
+        await t.read_holding(0x0100, 1)
+
+
+async def test_atomic_handle_is_invalidated_even_if_the_block_raises(client):
+    """Same as above, but through the exception exit path -- atomic()'s
+    `finally` must invalidate the handle regardless of how the block ends.
+    """
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+    with pytest.raises(ValueError):
+        async with transport.atomic() as t:
+            raise ValueError("caller's own compare-and-raise")
+    with pytest.raises(RuntimeError):
+        await t.read_holding(0x0100, 1)
+
+
+async def test_close_racing_an_in_flight_connect_still_wins(client):
+    """Finding B / Item 3 (re-review): connect() now shares the same lock as
+    close(), so a pause landing mid-reconnect cannot find `_client is None`,
+    return immediately, and then have the in-flight connect() assign its
+    client afterward -- which would leave the logger held after an explicit
+    pause, the exact contract this transport exists to guarantee.
+    """
+    connect_started = asyncio.Event()
+
+    async def slow_connect():
+        connect_started.set()
+        await asyncio.sleep(0.02)
+
+    client.connect.side_effect = slow_connect
+    transport = SolarmanV5Transport("h", 1)
+
+    async def do_close():
+        await connect_started.wait()
+        await transport.close()
+
+    await asyncio.gather(transport.connect(), do_close())
+    assert transport.connected is False
+    client.disconnect.assert_awaited_once()
+
+
+async def test_overlapping_connects_do_not_leak_a_socket(client):
+    """Finding B / Item 3 (re-review): two connect() calls racing (e.g. a
+    manual reload during a backoff retry) must not both pass the "am I
+    connected" check and each build/connect their own client -- that opens
+    two sockets to a device with exactly one slot and leaks the first. A
+    deliberate delay inside connect() forces the interleaving window every
+    run, rather than leaving the race's outcome up to scheduler luck.
+    """
+
+    async def slow_connect():
+        await asyncio.sleep(0.02)
+
+    client.connect.side_effect = slow_connect
+    transport = SolarmanV5Transport("h", 1)
+    await asyncio.gather(transport.connect(), transport.connect())
+    assert transport.connected is True
+    # The second call, serialised behind the same lock, must see
+    # `self.connected` already True once it gets its turn, and return
+    # without building or connecting anything a second time.
+    client.connect.assert_awaited_once()
+
+
+async def test_connect_does_not_hang_when_discarding_a_stalled_stale_client(client):
+    """Finding C / Item 4 (re-review): _discard_client's `await
+    client.disconnect()` used to have no bound of its own, so a stalled
+    disconnect() (a half-open socket sitting on TCP retransmits) could hang
+    connect()'s stale-client recovery path forever -- the coordinator's
+    backoff loop would never receive the error it needs in order to back off
+    from anything; it would just stop.
+    """
+
+    async def hang():
+        await asyncio.sleep(30)
+
+    async def fake_connect():
+        # A real connect() populates .reader afresh; the shared mock needs
+        # this spelled out or it would keep reporting the .reader=None we
+        # set below even after a "successful" second connect() call.
+        client.reader = MagicMock()
+
+    client.connect.side_effect = fake_connect
+    client.disconnect.side_effect = hang
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+    client.reader = None  # the session died in the background
+
+    async with asyncio.timeout(3.0):  # DISCARD_TIMEOUT (2.0s) plus margin
+        await transport.connect()  # must not hang on the stalled discard
+
+    assert transport.connected is True
+    assert client.connect.await_count == 2
+
+
+async def test_connect_failure_path_does_not_hang_when_discard_stalls(client):
+    """Same bound, the OTHER call site: connect()'s except-branch discards
+    the client it just failed to connect. If THAT disconnect() also stalls,
+    connect() must still surface the original connect failure within a
+    bounded time, not hang indefinitely.
+    """
+
+    async def hang_connect():
+        await asyncio.sleep(30)
+
+    async def hang_disconnect():
+        await asyncio.sleep(30)
+
+    client.connect.side_effect = hang_connect
+    client.disconnect.side_effect = hang_disconnect
+    transport = SolarmanV5Transport("h", 1, timeout=0.01)
+
+    async with asyncio.timeout(3.0):  # connect's own 0.01s + DISCARD_TIMEOUT
+        with pytest.raises(TransportTimeoutError):
+            await transport.connect()
+
+
+async def test_close_does_not_hang_when_disconnect_stalls(client):
+    """Same bound, close()'s own use of _discard_client -- pre-existing
+    exposure the review flagged as no worse than before, fixed for free by
+    bounding _discard_client itself rather than each call site separately.
+    """
+
+    async def hang():
+        await asyncio.sleep(30)
+
+    client.disconnect.side_effect = hang
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+
+    async with asyncio.timeout(3.0):
+        await transport.close()
+
+    assert transport.connected is False
+
+
+async def test_connect_failure_message_preserves_the_cause_and_errno(client):
+    """Finding 5 (re-review): the re-reviewer's mutation D2 (discard
+    err.__cause__ again) stayed green against the round-1 suite -- nothing
+    tested that the real errno survives into the error message. It is the
+    only thing that distinguishes a refused connection from an unreachable
+    host from a DNS failure, which is the entire point of the phase-aware
+    mapping (Finding 2).
+    """
+    cause = OSError("Connection refused")
+    cause.errno = 111
+    no_socket = NoSocketAvailableError("cannot open connection")
+    no_socket.__cause__ = cause
+    client.connect.side_effect = no_socket
+    transport = SolarmanV5Transport("h", 1)
+    with pytest.raises(TransportConnectionError) as exc_info:
+        await transport.connect()
+    message = str(exc_info.value)
+    assert "111" in message, message
+    assert "OSError" in message, message
+
+
+async def test_connected_reflects_a_reader_task_that_died_without_nulling_reader(
+    client,
+):
+    """Finding 6 (re-review, promoted from the "residual" list): pysolarmanv5's
+    `_conn_keeper` only nulls `.reader`/`.writer` when its `while True` loop
+    RETURNS (a caught ConnectionResetError, or a clean EOF). An ETIMEDOUT (an
+    AP reboot, a NAT-table eviction) or ConnectionAbortedError raised from
+    `reader.read()` is NOT caught by that narrow except clause -- it escapes
+    the loop entirely, so the tail that nulls .reader/.writer never runs,
+    even though the task itself is `done()` (with that exception set). This
+    is Finding 3 from round 1 surviving on a second, narrower path.
+    """
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+    assert transport.connected is True
+
+    # Simulate the reader task dying from an uncaught exception WITHOUT
+    # _conn_keeper's tail (which nulls .reader/.writer) ever running: only
+    # reader_task.done() reflects the death, .reader stays exactly as it was.
+    dead_task = asyncio.get_running_loop().create_future()
+    dead_task.set_result(None)  # only .done() is consulted here
+    client.reader_task = dead_task
+
+    assert transport.connected is False
+
+
+async def test_connect_rebuilds_when_only_the_reader_task_died():
+    """Same recovery proof as test_connect_rebuilds_a_dead_session_instead_
+    of_a_silent_no_op, but through the reader-task-death path instead of the
+    reader-is-None path -- connect() must discard and rebuild either way.
+    """
+    first = AsyncMock()
+    first.connect = AsyncMock()
+    first.disconnect = AsyncMock()
+    first.reader_task = _live_reader_task()
+    second = AsyncMock()
+    second.connect = AsyncMock()
+    second.reader_task = _live_reader_task()
+
+    with patch(TARGET, side_effect=[first, second]):
+        transport = SolarmanV5Transport("h", 1)
+        await transport.connect()
+        assert transport.connected is True
+
+        dead_task = asyncio.get_running_loop().create_future()
+        dead_task.set_result(None)
+        first.reader_task = dead_task  # died without nulling .reader
+
+        assert transport.connected is False
+
+        await transport.connect()  # must not be a silent no-op
+
+        assert transport.connected is True  # now backed by `second`
+        first.disconnect.assert_awaited_once()
+        second.connect.assert_awaited_once()
+
+
+async def test_cancelling_close_does_not_strand_the_client(client):
+    """Finding 7 (re-review, promoted from the "residual" list): close()
+    used to null `self._client` BEFORE the `_discard_client` await it was
+    about to do, so a cancellation mid-disconnect released the lock but left
+    NOTHING referencing the client -- the socket leaked forever, because
+    connect()'s "discard a stale client" step only fires when `self._client
+    is not None`, and it no longer was. close() now nulls `self._client`
+    only AFTER the discard returns, so a cancellation leaves the client
+    still tracked, and a later attempt can retry disconnecting it.
+    """
+    disconnect_started = asyncio.Event()
+
+    async def hang():
+        disconnect_started.set()
+        await asyncio.sleep(30)
+
+    client.disconnect.side_effect = hang
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+
+    close_task = asyncio.ensure_future(transport.close())
+    await disconnect_started.wait()
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    # The client must still be tracked, not silently dropped. There is no
+    # public signal for "still tracked but the socket may still be open" --
+    # that ambiguity is exactly what a leak would hide -- so this reaches
+    # into the private attribute deliberately.
+    assert transport._client is client
+
+    # A later close() attempt must retry discarding the SAME stranded
+    # client rather than treating it as already gone.
+    client.disconnect.side_effect = None
+    await transport.close()
+    assert transport.connected is False
+    assert client.disconnect.await_count == 2  # the cancelled attempt + the retry
