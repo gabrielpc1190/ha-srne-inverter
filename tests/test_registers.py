@@ -198,3 +198,34 @@ def test_decode_matches_golden_snapshot(justice_registers):
     )
     values = R.decode(justice_registers)
     assert values == golden
+
+
+def test_decode_distinguishes_float_from_boost_and_equalize(
+    justice_settings_after_bms_off,
+):
+    """Guards against a float_voltage (E009) address swap with boost_voltage
+    (E008) or equalize_voltage (E007) -- a real hole the golden snapshot above
+    cannot see.
+
+    In the `before` capture (what justice_registers/the golden snapshot use),
+    E007, E008 and E009 all read raw 144 because a live BMS pins them to the
+    same fixed value while connected, so swapping which Field points at which
+    of those three addresses would still produce an identical decoded output
+    there. justice_inv1_settings.json's `after_bms_off` map, taken moments
+    later with the BMS disconnected, is a second real capture where they are
+    NOT all equal (E007=142, E008=142, E009=140) -- enough to prove
+    float_voltage is not wired to the same address as boost_voltage or
+    equalize_voltage.
+
+    This closes ONLY the float-vs-{boost,equalize} half of the hole. It does
+    NOT close a boost_voltage/equalize_voltage (E008/E007) swap against each
+    other: E007 and E008 are identical in every capture recorded in this repo
+    (144/144 in `before`, 142/142 in `after_bms_off`), so separating those two
+    is genuinely impossible with the evidence on hand -- it needs a new
+    capture where they differ. Do not delete this test as "redundant with the
+    golden snapshot"; it is the only test that can see this at all.
+    """
+    values = R.decode(justice_settings_after_bms_off)
+    assert values["float_voltage"] == pytest.approx(140 * 0.4)      # 56.0 V
+    assert values["boost_voltage"] == pytest.approx(142 * 0.4)      # 56.8 V
+    assert values["equalize_voltage"] == pytest.approx(142 * 0.4)   # 56.8 V

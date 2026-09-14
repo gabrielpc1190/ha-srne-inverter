@@ -106,3 +106,30 @@ def justice_registers_complete_fixture() -> dict[int, int]:
     load_justice_registers_synthetic_complete()'s docstring. Some of the
     values this returns are FAKE; never treat them as device evidence."""
     return load_justice_registers_synthetic_complete()
+
+
+def load_justice_settings_after_bms_off() -> dict[int, int]:
+    """Flatten justice_inv1_settings.json's `after_bms_off` map into
+    {address: raw_value}.
+
+    A second REAL capture of the same settings registers as
+    load_justice_registers()'s `before` map, taken moments later after the
+    BMS was disconnected. While a live BMS is connected it pins E007-E009 to
+    the same fixed value (144 in `before`), which is why those three registers
+    are indistinguishable there; `after_bms_off` is the one capture in this
+    repo where they are not all equal (E007=142, E008=142, E009=140), which is
+    exactly why test_registers.py uses it to guard against a float_voltage/
+    boost_voltage/equalize_voltage address swap. Never edited to plug test
+    holes -- read as-is from the recorded file.
+    """
+    settings_doc = json.loads((FIXTURES / "justice_inv1_settings.json").read_text())
+    return {
+        int(key, 16): value for key, value in settings_doc["after_bms_off"].items()
+    }
+
+
+@pytest.fixture(name="justice_settings_after_bms_off")
+def justice_settings_after_bms_off_fixture() -> dict[int, int]:
+    """Recorded Justice inverter 1 settings registers, captured after the BMS
+    was disconnected -- see load_justice_settings_after_bms_off()'s docstring."""
+    return load_justice_settings_after_bms_off()
