@@ -1,0 +1,67 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SRNE inverter via Solarman logger",
+        "description": "Leave the serial empty to read it from http://<host>/status.html (basic auth admin/admin). In a parallel bank the host inverter is slave 1 and the second one is slave 2.",
+        "data": {
+          "name": "Name",
+          "host": "Logger IP address",
+          "port": "TCP port",
+          "serial": "Logger serial (optional)",
+          "slave_id": "Modbus slave id",
+          "scan_interval": "Fast poll interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the logger. Check the IP address and port, and that the logger is powered on and reachable on the network. If you are sure it is reachable, another tool (a leftover monitor, a second entry pointed at this same logger) may be holding its single connection slot.",
+      "cannot_read_serial": "Could not read the serial from http://<host>/status.html. Enter it by hand.",
+      "invalid_serial": "The serial must be digits only.",
+      "invalid_slave": "The logger answered but the inverter did not. Check the Modbus slave id (host = 1, second unit = 2).",
+      "unknown": "Unexpected error. Check the Home Assistant log."
+    },
+    "abort": {
+      "already_configured": "This logger is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling intervals",
+        "data": {
+          "scan_interval": "Fast (battery, grid, load) seconds",
+          "warm_interval": "Settings blocks, seconds",
+          "cold_interval": "Device info and meters, seconds"
+        }
+      }
+    }
+  },
+  "services": {
+    "read_register": {
+      "name": "Read register",
+      "description": "Read raw holding registers from an inverter.",
+      "fields": {
+        "device_id": {"name": "Device", "description": "Inverter to read from."},
+        "address": {"name": "Address", "description": "First register address (decimal or 0x hex)."},
+        "count": {"name": "Count", "description": "How many registers to read."}
+      }
+    },
+    "write_register": {
+      "name": "Write register",
+      "description": "Write one raw holding register and verify the read-back.",
+      "fields": {
+        "device_id": {"name": "Device", "description": "Inverter to write to."},
+        "address": {"name": "Address", "description": "Register address (decimal or 0x hex)."},
+        "value": {"name": "Value", "description": "Raw register value."}
+      }
+    },
+    "reprobe": {
+      "name": "Reprobe",
+      "description": "Re-read every block and add entities that appeared.",
+      "fields": {
+        "device_id": {"name": "Device", "description": "Inverter to probe."}
+      }
+    }
+  }
+}
