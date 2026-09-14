@@ -56,7 +56,10 @@ import logging
 from dataclasses import dataclass, field as dc_field
 from enum import StrEnum
 
-try:
+if __package__:
+    # Imported normally, as custom_components.srne_inverter.probe (the test
+    # suite, and later Home Assistant): a real parent package exists, so the
+    # relative form resolves.
     from .registers import BLOCKS, Block
     from .transport.base import (
         Transport,
@@ -65,15 +68,20 @@ try:
         TransportProtocolError,
         UnsupportedRegisterError,
     )
-except ImportError:
+else:
     # tools/probe.py puts custom_components/srne_inverter/ on sys.path and
     # imports this module as a bare top-level `probe`, with no parent
-    # package -- the relative imports above have nothing to be relative TO
-    # in that shape and raise ImportError ("attempted relative import with
-    # no known parent package"). Absolute imports resolve the very same two
-    # sibling modules directly off sys.path instead. When this module is
-    # imported normally, as custom_components.srne_inverter.probe, the try
-    # branch above always succeeds and this branch never runs.
+    # package -- `__package__` is '' in that shape, and the relative form
+    # above would raise ImportError ("attempted relative import with no
+    # known parent package") before resolving anything. Absolute imports
+    # resolve the very same two sibling modules directly off sys.path
+    # instead. Branching on `__package__` (the actual condition) rather than
+    # catching ImportError (a symptom) matters here: a broad `except
+    # ImportError` would also swallow a GENUINE ImportError raised from
+    # inside registers/transport.base (a circular import, a renamed symbol,
+    # a missing third-party dependency) and misreport it as the unrelated
+    # "No module named 'registers'" from this fallback -- hiding the real
+    # cause from whoever is debugging it.
     from registers import BLOCKS, Block  # type: ignore[import-not-found]
     from transport.base import (  # type: ignore[import-not-found]
         Transport,
@@ -114,7 +122,24 @@ class BlockSupport(StrEnum):
 
 
 class ProbeFailedError(TransportError):
-    """Not a single block answered -- the unit or the link is down."""
+    """Not a single block answered -- the unit or the link is down.
+
+    Carries the `ProbeResult` accumulated before the failure (possibly
+    partial, if the deadline expired mid-pass; possibly complete, if every
+    block was tried and none came back SUPPORTED) as `.result`, so a caller
+    can report the ACTUAL recorded per-block errors instead of guessing at a
+    single cause. Fix round 1 (2026-09-13, task-6 review): `tools/probe.py`
+    was asserting "a wrong slave id is the classic cause" on every
+    ProbeFailedError, including one caused by another client stealing the
+    logger's session mid-probe -- `result.errors` already held the correct
+    "session was lost or taken" story and was being thrown away because
+    this exception carried no way to reach it. `.result` may be `None` if
+    this is ever raised by code other than `probe()` itself without one.
+    """
+
+    def __init__(self, message: str, result: "ProbeResult | None" = None) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 @dataclass(slots=True)
@@ -174,11 +199,14 @@ async def probe(
     except TimeoutError as err:
         raise ProbeFailedError(
             f"probe exceeded its {deadline} s deadline; the unit or the "
-            "link is unresponsive"
+            "link is unresponsive",
+            result,
         ) from err
 
     if not any(state is BlockSupport.SUPPORTED for state in result.support.values()):
-        raise ProbeFailedError("no block answered; the unit or the link is down")
+        raise ProbeFailedError(
+            "no block answered; the unit or the link is down", result
+        )
 
     return result
 
