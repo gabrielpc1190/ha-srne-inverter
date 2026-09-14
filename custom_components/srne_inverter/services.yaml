@@ -1,0 +1,47 @@
+read_register:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: srne_inverter
+    address:
+      required: true
+      example: "0x0100"
+      selector:
+        text:
+    count:
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 64
+          mode: box
+
+write_register:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: srne_inverter
+    address:
+      required: true
+      example: "0xE01E"
+      selector:
+        text:
+    value:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+
+reprobe:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: srne_inverter

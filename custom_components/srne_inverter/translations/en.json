@@ -66,5 +66,19 @@
         "device_id": {"name": "Device", "description": "Inverter to probe."}
       }
     }
+  },
+  "exceptions": {
+    "unknown_device": {
+      "message": "Unknown device: {device_id}."
+    },
+    "entry_not_loaded": {
+      "message": "Device {device_id} has no loaded srne_inverter config entry."
+    },
+    "write_rejected_known": {
+      "message": "Register {address} is known to reject writes on this firmware (verified at Casa Justice, V8.18.006). Refusing before sending anything to the device."
+    },
+    "write_absent_block": {
+      "message": "Register {address} falls inside a range verified absent on this firmware (V8.18.006). Refusing before sending anything to the device."
+    }
   }
 }

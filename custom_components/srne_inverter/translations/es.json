@@ -66,5 +66,19 @@
         "device_id": {"name": "Equipo", "description": "Inversor a sondear."}
       }
     }
+  },
+  "exceptions": {
+    "unknown_device": {
+      "message": "Equipo desconocido: {device_id}."
+    },
+    "entry_not_loaded": {
+      "message": "El equipo {device_id} no tiene una entrada srne_inverter cargada."
+    },
+    "write_rejected_known": {
+      "message": "El registro {address} rechaza escrituras en este firmware (verificado en Casa Justice, V8.18.006). Se rechaza antes de enviar nada al equipo."
+    },
+    "write_absent_block": {
+      "message": "El registro {address} está dentro de un rango verificado como ausente en este firmware (V8.18.006). Se rechaza antes de enviar nada al equipo."
+    }
   }
 }
