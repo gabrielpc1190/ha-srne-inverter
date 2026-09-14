@@ -15,9 +15,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from . import registers as R
 from .const import BACKOFF_SECONDS, BLOCK_PAUSE, DOMAIN, REPROBE_AFTER_FAILURES, WRITE_SETTLE
-from .probe import BlockSupport, ProbeResult, probe
+from .probe import BlockSupport, ProbeFailedError, ProbeResult, probe
 from .registers import BlockTier, Field
-from .transport.base import Transport, TransportError
+from .transport.base import Transport, TransportError, UnsupportedRegisterError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,17 +36,32 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
 
     Tier scheduling: `_tier_due` maps a tier to the monotonic time it next
     becomes due. A tier with no entry in that dict (the state right after
-    __init__ or right after a probe) is treated as due immediately -- see
-    `_read_due_blocks`'s `self._tier_due.get(tier, 0.0)` default, which is
-    always <= `time.monotonic()`. This is a deliberate deviation from the
-    task brief, which had `async_probe()` pre-seed WARM/COLD to fire only
-    after their full interval -- that directly contradicted the brief's own
-    first test ("first cycle is due on every tier"): with a pre-seeded
-    schedule, only HOT would have been due on the read that follows a probe.
-    Resetting to "everything due" on every (re-)probe is also the more
-    sensible behaviour: a probe just produced a fresh capability map, so the
-    next poll should build one full snapshot before settling back into the
-    tiered cadence.
+    __init__) is treated as due immediately -- see `_read_due_blocks`'s
+    `self._tier_due.get(tier, 0.0)` default, which is always
+    <= `time.monotonic()`.
+
+    Fix round 1 (Task 7 review, Finding 6): `async_probe()` seeds every
+    tier's next deadline from the probe's own read time (`now + interval`)
+    rather than clearing the schedule to "everything due". An earlier
+    version of this method cleared it, which made the very first poll cycle
+    after any probe re-read all 10 blocks a SECOND time -- the probe had
+    just read every one of them moments earlier. Seeding is also what the
+    original brief's starter code did, but it seeded WARM/COLD too eagerly
+    (see the History note below) -- this only reschedules from the probe's
+    OWN `now`, which is correct because the probe really did just read
+    everything at that instant.
+
+    History: the brief this task was built from pre-seeded WARM/COLD the
+    same way, but its very first test asserted the OPPOSITE ("first cycle is
+    due on every tier") -- a real contradiction between the brief's starter
+    code and the brief's own test, not a synonym for what is implemented
+    now. The first fix round (see `task-7-report.md`) resolved that by
+    clearing the schedule instead, which the review then flagged as
+    needlessly doubling every probe's cost; this docstring records the third
+    and final shape: seed correctly, and let the test that used to demand
+    "read everything again" instead assert "only HOT needs re-reading,
+    because the probe already has fresh WARM/COLD data"
+    (`test_probe_then_first_cycle_only_rereads_hot`).
     """
 
     def __init__(
@@ -113,18 +128,37 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
         coordinator that swallowed it here would set up a device with zero
         entities that polls nothing, which is the exact silent-failure mode
         probe.py's own "Fix round 1" exists to prevent.
+
+        Fix round 1 (Task 7 review, Finding 12): on that failure path this
+        now closes the transport before re-raising. Leaving the socket open
+        would strand a connected client across whatever ConfigEntryNotReady
+        retry follows -- holding the logger's one TCP slot hostage against
+        this integration's own next attempt, the standalone CLI probe, and
+        Gabriel's own justice_watch.py all at once. A caller is still free to
+        close it again (idempotent, see Transport.close()'s contract); this
+        just guarantees the failure path never leaves it open by omission.
         """
         if not self.transport.connected:
             await self.transport.connect()
-        result = await probe(self.transport, pause=BLOCK_PAUSE)
+        try:
+            result = await probe(self.transport, pause=BLOCK_PAUSE)
+        except ProbeFailedError:
+            await self.transport.close()
+            raise
         self.probe_result = result
         self._registers.update(result.registers)
         self._reprobe_pending = False
-        # A fresh probe invalidates any prior schedule: the next read cycle
-        # should build one full snapshot across every tier before settling
-        # back into hot/warm/cold. See the class docstring for why this is
-        # "clear the schedule", not "seed it with future deadlines".
-        self._tier_due = {}
+        # The probe just read every block once: seed every tier's next
+        # deadline from THIS moment instead of leaving everything due
+        # immediately. See the class docstring's "Fix round 1" note for why
+        # this used to clear the schedule and cost a second full ten-block
+        # pass on every probe.
+        now = time.monotonic()
+        self._tier_due = {
+            BlockTier.HOT: now + self.scan_interval,
+            BlockTier.WARM: now + self.warm_interval,
+            BlockTier.COLD: now + self.cold_interval,
+        }
         _LOGGER.debug("Probe result for %s: %s", self.name, result.as_diagnostics())
         return result
 
@@ -187,7 +221,43 @@ class SrneCoordinator(DataUpdateCoordinator[SrneData]):
         for index, block in enumerate(blocks):
             if index:
                 await asyncio.sleep(BLOCK_PAUSE)
-            values = await self.transport.read_holding(block.addr, block.count)
+            if not self._connection_enabled:
+                # Fix round 1, Finding 2: a pause can land WHILE a cycle is
+                # already in flight (async_set_connection_enabled(False) only
+                # runs between cycles from this method's own point of view).
+                # Checked AFTER the pause-sleep above, not just at the top of
+                # the loop: the sleep is the one real yield point per block,
+                # so this is where a pause that landed during it is actually
+                # observed, immediately before the read that would otherwise
+                # raise TransportConnectionError on the now-closed socket --
+                # which used to get booked as a device failure (backoff
+                # armed, an HA error logged) for what was a deliberate user
+                # action. Stop quietly instead; blocks already read this
+                # cycle keep their data, and the tiers still pending stay
+                # due (the reschedule loop below is never reached for them).
+                _LOGGER.debug(
+                    "%s: connection paused mid-cycle, stopping after %d/%d "
+                    "due blocks", self.name, index, len(blocks),
+                )
+                return
+            try:
+                values = await self.transport.read_holding(block.addr, block.count)
+            except UnsupportedRegisterError as err:
+                # Fix round 1, Finding 1: IllegalDataAddress is the device
+                # answering on a socket that is demonstrably fine -- proof
+                # the block does not exist, not evidence the link is down.
+                # Reclassify it (permanently, matching probe()'s own
+                # UNSUPPORTED semantics) and carry on with the rest of this
+                # cycle instead of tearing down the one-slot session and
+                # discarding every block already read successfully.
+                if self.probe_result is not None:
+                    self.probe_result.support[block.addr] = BlockSupport.UNSUPPORTED
+                _LOGGER.debug(
+                    "%s: 0x%04X answered IllegalDataAddress mid-poll; "
+                    "reclassified UNSUPPORTED (%s)",
+                    self.name, block.addr, err,
+                )
+                continue
             for offset, value in enumerate(values):
                 self._registers[block.addr + offset] = value
 
