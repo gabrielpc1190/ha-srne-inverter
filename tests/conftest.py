@@ -100,11 +100,14 @@ def load_justice_registers_synthetic_complete() -> dict[int, int]:
     return complete
 
 
-@pytest.fixture(name="justice_registers_complete")
-def justice_registers_complete_fixture() -> dict[int, int]:
+@pytest.fixture(name="justice_registers_synthetic_complete")
+def justice_registers_synthetic_complete_fixture() -> dict[int, int]:
     """Recorded Justice registers, synthetically completed -- see
     load_justice_registers_synthetic_complete()'s docstring. Some of the
-    values this returns are FAKE; never treat them as device evidence."""
+    values this returns are FAKE; never treat them as device evidence.
+    "synthetic" stays in the fixture name on purpose (fix round 2, Finding
+    6): a caller wiring this into a test should see what it is from the
+    name alone, without having to go read the loader's docstring."""
     return load_justice_registers_synthetic_complete()
 
 

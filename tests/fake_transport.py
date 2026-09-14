@@ -76,6 +76,7 @@ class FakeTransport:
         *,
         unsupported: Iterable[range] = DEFAULT_UNSUPPORTED,
         connect_error: Exception | None = None,
+        connect_errors: Sequence[Exception | None] | None = None,
         read_errors: Sequence[Exception | None] | None = None,
         write_errors: Sequence[Exception | None] | None = None,
         no_stick_writes: Iterable[int] = (),
@@ -88,12 +89,24 @@ class FakeTransport:
             unsupported: address ranges that always answer
                 UnsupportedRegisterError (device fact), independent of
                 `registers`. Defaults to DEFAULT_UNSUPPORTED.
-            connect_error: if set, every connect() call raises this exact
-                exception instance instead of succeeding (sticky, not
-                one-shot -- clear it between calls if a test needs
-                "fails once then succeeds"). Typically a
-                TransportConnectionError, TransportBusyError or
-                TransportTimeoutError.
+            connect_error: if set, and `connect_errors` is empty/exhausted,
+                every connect() call raises this exact exception instance
+                instead of succeeding (sticky -- it does not get consumed).
+                Typically a TransportConnectionError, TransportBusyError or
+                TransportTimeoutError. Kept for the simple "always fails"
+                case; see `connect_errors` for "fails N times, then
+                succeeds".
+            connect_errors: a queue of Exception | None, consumed one entry
+                per connect() call regardless of prior attempts -- an
+                Exception is raised (and popped), None means "succeed this
+                call" (and pops too, so it is consumed like any other
+                entry). While this queue has entries, it takes priority over
+                `connect_error`; once exhausted, `connect_error` (if any)
+                applies to every later call. This is what lets a test model
+                this hardware's single most common real failure mode --
+                "another client held the logger, then released it" --
+                inside a retry loop the test does not control, e.g.
+                `connect_errors=[TransportBusyError(...), None]`.
             read_errors: a queue of Exception | None, consumed one entry per
                 read_holding call regardless of address -- an Exception is
                 raised (and popped), None means "succeed normally this call".
@@ -101,7 +114,12 @@ class FakeTransport:
             write_errors: same queue semantics as read_errors, but for
                 write_holding. Use this to simulate value-dependent firmware
                 rejections a specific test wants to force (e.g. a write the
-                real device would answer IllegalDataValue to).
+                real device would answer IllegalDataValue to). Deliberately
+                the ONLY way to model that: FakeTransport never validates a
+                written value against registers.py's WriteSpec ranges, and
+                must not grow that -- a fake must never implement the logic
+                (Task 11/12's write validation) that the tests exist to
+                check.
             no_stick_writes: addresses where write_holding is accepted (no
                 exception, and the call IS recorded in `writes`) but the
                 stored value is never actually updated -- the read-back stays
@@ -112,6 +130,7 @@ class FakeTransport:
         self.registers = dict(registers)
         self.unsupported = tuple(unsupported)
         self.connect_error = connect_error
+        self._connect_errors = list(connect_errors or [])
         self._read_errors = list(read_errors or [])
         self._write_errors = list(write_errors or [])
         self.no_stick_writes = frozenset(no_stick_writes)
@@ -125,10 +144,16 @@ class FakeTransport:
     def connected(self) -> bool:
         return self._connected
 
+    def _next_connect_error(self) -> Exception | None:
+        if self._connect_errors:
+            return self._connect_errors.pop(0)
+        return self.connect_error
+
     async def connect(self) -> None:
         self.connect_count += 1
-        if self.connect_error is not None:
-            raise self.connect_error
+        error = self._next_connect_error()
+        if error is not None:
+            raise error
         self._connected = True
 
     async def close(self) -> None:
@@ -146,11 +171,15 @@ class FakeTransport:
         return self._write_errors.pop(0)
 
     async def read_holding(self, addr: int, count: int) -> list[int]:
-        self.reads.append((addr, count))
+        # Not-connected is checked BEFORE recording the attempt: a call the
+        # fake refuses outright never touched anything, so it must not show
+        # up in `reads` -- otherwise "the pause switch left the log empty"
+        # (Task 12) could never be asserted honestly.
         if not self._connected:
             raise TransportConnectionError(
                 f"fake: not connected, cannot read 0x{addr:04X}"
             )
+        self.reads.append((addr, count))
         error = self._next_read_error()
         if error is not None:
             raise error
@@ -171,11 +200,13 @@ class FakeTransport:
         return [self.registers[addr + i] for i in range(count)]
 
     async def write_holding(self, addr: int, value: int) -> None:
-        self.writes.append((addr, value))
+        # Same rule as read_holding: not-connected is checked BEFORE
+        # recording the attempt.
         if not self._connected:
             raise TransportConnectionError(
                 f"fake: not connected, cannot write 0x{addr:04X}"
             )
+        self.writes.append((addr, value))
         error = self._next_write_error()
         if error is not None:
             raise error
@@ -183,6 +214,21 @@ class FakeTransport:
             raise InvalidRegisterValueError(f"fake: 0x{addr:04X} refuses writes")
         if any(addr in span for span in self.unsupported):
             raise UnsupportedRegisterError(f"fake: 0x{addr:04X} absent")
+        if addr not in self.registers:
+            # Mirrors read_holding's fixture-gap check: an address that is
+            # neither recorded nor declared unsupported is UNKNOWN, and a
+            # silent, confident write+read-back round trip through an
+            # address nothing knows anything about is not evidence of
+            # anything -- it must be as loud as the equivalent read.
+            raise LookupError(
+                f"fixture gap: 0x{addr:04X} is not in this FakeTransport's "
+                "registers and is not declared unsupported either. Writing "
+                "to an address nothing knows about would silently succeed "
+                "and read back cleanly, which is not evidence the device "
+                "accepts it -- seed it first (e.g. via "
+                "tests.conftest.load_justice_registers_synthetic_complete) "
+                "or add it to `unsupported` if it is verified absent."
+            )
         if addr in self.no_stick_writes:
             return
         self.registers[addr] = value

@@ -9,10 +9,22 @@ defects cannot silently come back:
   - the connection-ownership contract (caller owns connect/close) is enforced
   - write_errors / no_stick_writes make the "accepted but rejected/ignored"
     paths directly testable
+
+Fix round 2 (2026-09-13, same day): the fix itself introduced new defects,
+found by re-review with a mutation battery. Additional tests pin:
+  - a call the fake refuses for not being connected leaves `reads`/`writes`
+    untouched (the not-connected guard now runs before the append)
+  - `connect_errors` lets a busy-then-recovers retry sequence be expressed
+  - DEFAULT_UNSUPPORTED's *content* is a tested property, not just a script
+    in a report: zero overlap with recorded addresses, zero overlap with any
+    address `registers.BLOCKS` declares present
+  - writes are exactly as loud as reads about an address nothing knows
+    anything about (both raise LookupError, not just reads)
 """
 
 import pytest
 
+from custom_components.srne_inverter.registers import BLOCKS
 from custom_components.srne_inverter.transport.base import (
     InvalidRegisterValueError,
     Transport,
@@ -20,7 +32,7 @@ from custom_components.srne_inverter.transport.base import (
     TransportConnectionError,
     UnsupportedRegisterError,
 )
-from tests.fake_transport import FakeTransport
+from tests.fake_transport import DEFAULT_UNSUPPORTED, FakeTransport
 
 
 # --- reads -------------------------------------------------------------
@@ -51,13 +63,18 @@ async def test_absent_block_is_distinguished_from_fixture_gap(justice_registers)
     defect in DEFAULT_UNSUPPORTED went uncaught."""
     transport = FakeTransport(justice_registers, unsupported=())
     await transport.connect()
-    with pytest.raises(LookupError):
+    with pytest.raises(LookupError) as first_exc:
         await transport.read_holding(0x0112, 4)
-    with pytest.raises(LookupError):
+    with pytest.raises(LookupError) as second_exc:
         await transport.read_holding(0xE21F, 2)
-    # And a LookupError is emphatically not a TransportError subclass -- a
-    # caller catching the transport taxonomy must not accidentally swallow it.
-    assert not isinstance(LookupError(), UnsupportedRegisterError)
+    # The exceptions FakeTransport actually raised must not be
+    # UnsupportedRegisterError -- checking a freshly constructed, unrelated
+    # LookupError() here (fix round 1's original assertion) is tautological,
+    # since it never depends on FakeTransport's behaviour at all. Checking
+    # the two instances the code under test actually produced is the
+    # assertion that could fail if that ever changed.
+    assert not isinstance(first_exc.value, UnsupportedRegisterError)
+    assert not isinstance(second_exc.value, UnsupportedRegisterError)
 
 
 async def test_partial_block_read_raises_without_partial_data(justice_registers):
@@ -155,6 +172,22 @@ async def test_write_errors_are_injectable_once(justice_registers):
     assert transport.writes == [(0xE01E, 999), (0xE01E, 16)]
 
 
+@pytest.mark.parametrize("addr", [0xE130, 0x023A])
+async def test_write_to_unknown_address_raises_lookup_error(justice_registers, addr):
+    """Fix round 2, Finding 4 -- same defect class as round 1's Finding 1,
+    now on the write path. The reviewer measured that writing to an address
+    that is neither recorded nor declared unsupported (0xE130, just past
+    the settings_high/config gap; 0x023A, one past the end of the declared
+    "inverter_b" block) silently succeeded and read back cleanly, while the
+    equivalent read already correctly raised LookupError. Writes must be as
+    loud as reads about an address nothing knows anything about."""
+    transport = FakeTransport(justice_registers)
+    await transport.connect()
+    assert addr not in justice_registers  # sanity: genuinely unknown, not just untested
+    with pytest.raises(LookupError):
+        await transport.write_holding(addr, 1)
+
+
 async def test_no_stick_write_produces_read_back_mismatch(justice_registers):
     """The correct recipe for testing a write the firmware accepts but does
     not actually apply: declare the address via `no_stick_writes` at
@@ -234,12 +267,18 @@ async def test_read_before_connect_raises_connection_error(justice_registers):
     transport = FakeTransport(justice_registers)
     with pytest.raises(TransportConnectionError):
         await transport.read_holding(0x0100, 1)
+    # Fix round 2, Finding 1: a call the fake refused outright must not show
+    # up in the log -- Task 12's natural pause-switch assertion is
+    # `transport.reads == []`, and that can only ever hold if a refused call
+    # never got appended in the first place.
+    assert transport.reads == []
 
 
 async def test_write_before_connect_raises_connection_error(justice_registers):
     transport = FakeTransport(justice_registers)
     with pytest.raises(TransportConnectionError):
         await transport.write_holding(0xE01E, 1)
+    assert transport.writes == []
 
 
 async def test_read_after_close_raises_connection_error(justice_registers):
@@ -252,6 +291,9 @@ async def test_read_after_close_raises_connection_error(justice_registers):
     await transport.close()
     with pytest.raises(TransportConnectionError):
         await transport.read_holding(0x0100, 1)
+    # Fix round 2, Finding 1: same as the before-connect case above -- the
+    # refused read after close() must not appear in `reads` either.
+    assert transport.reads == []
 
 
 async def test_write_after_close_raises_connection_error(justice_registers):
@@ -260,6 +302,49 @@ async def test_write_after_close_raises_connection_error(justice_registers):
     await transport.close()
     with pytest.raises(TransportConnectionError):
         await transport.write_holding(0xE01E, 1)
+    assert transport.writes == []
+
+
+async def test_connect_errors_queue_lets_a_busy_retry_succeed(justice_registers):
+    """Fix round 2, Finding 2: `connect_error` alone is sticky-only, so
+    "busy, busy, then through" -- this hardware's single most common real
+    failure mode, another client holding the logger and then releasing it --
+    could not be expressed when the retry loop lives inside the code under
+    test. `connect_errors` is a queue, like `read_errors`/`write_errors`."""
+    transport = FakeTransport(
+        justice_registers,
+        connect_errors=[
+            TransportBusyError("fake: logger busy"),
+            TransportBusyError("fake: logger busy"),
+            None,
+        ],
+    )
+    with pytest.raises(TransportBusyError):
+        await transport.connect()
+    with pytest.raises(TransportBusyError):
+        await transport.connect()
+    await transport.connect()  # third attempt: queue says None -> succeeds
+    assert transport.connected is True
+    assert transport.connect_count == 3
+
+
+async def test_connect_errors_queue_defers_to_sticky_connect_error_when_exhausted(
+    justice_registers,
+):
+    """Once the `connect_errors` queue runs out, `connect_error` (if set)
+    takes back over for every later call -- the "keep the sticky behaviour"
+    half of the fix round 2 instruction."""
+    transport = FakeTransport(
+        justice_registers,
+        connect_errors=[None],
+        connect_error=TransportBusyError("fake: logger busy"),
+    )
+    await transport.connect()  # queue's only entry: None -> succeeds
+    assert transport.connected is True
+    await transport.close()
+    with pytest.raises(TransportBusyError):
+        await transport.connect()  # queue exhausted -> falls back to sticky
+    assert transport.connected is False
 
 
 # --- data integrity --------------------------------------------------------
@@ -284,7 +369,76 @@ async def test_registers_dict_is_copied_not_aliased(justice_registers):
 
 def test_fake_transport_satisfies_protocol():
     """The brief's own stated verification criterion, made an actual
-    assertion instead of something checked once by hand -- this is what will
-    catch Task 4's real transport drifting from the Protocol."""
+    assertion instead of something checked once by hand.
+
+    Corrected in fix round 2 (Finding 5): this does NOT catch "Task 4's real
+    transport drifting from the Protocol" in any general sense, and must not
+    be trusted to. `Transport` is `@runtime_checkable`, and per `typing`'s
+    own documentation such a check only verifies that the named methods and
+    attributes EXIST on the object -- not their signatures, not whether
+    `read_holding` is actually a coroutine function, not the
+    connection-ownership contract in the class docstring. It WOULD catch a
+    transport that is missing one of the four methods or `connected`
+    entirely (e.g. a typo'd rename). It would NOT catch a real transport
+    whose `read_holding` takes the arguments in the wrong order, that
+    reconnects silently after close(), or that returns a generator instead
+    of a coroutine. Treat this as a cheap smoke test for "did I forget to
+    implement a method", not as proof of Protocol conformance.
+    """
     transport = FakeTransport({})
     assert isinstance(transport, Transport)
+
+
+# --- DEFAULT_UNSUPPORTED properties -----------------------------------------
+
+
+def test_default_unsupported_never_covers_a_recorded_address(justice_registers):
+    """Fix round 2, Finding 3: turn the report's one-off regression-gate
+    script into an actual test. Property: DEFAULT_UNSUPPORTED must have zero
+    intersection with any address our own recorded capture has real data
+    for -- if it did, the fake would claim IllegalDataAddress for an address
+    we have live proof responds. This is exactly what would have caught
+    round 1's Critical-2 defect (0xE100-0xE12F wrongly marked absent) the
+    moment it was introduced, instead of only in a manual reviewer pass."""
+    recorded_addresses = set(justice_registers)
+    unsupported_addresses = {addr for span in DEFAULT_UNSUPPORTED for addr in span}
+    overlap = recorded_addresses & unsupported_addresses
+    assert overlap == set(), (
+        "DEFAULT_UNSUPPORTED wrongly claims these recorded addresses are "
+        f"absent: {sorted(hex(a) for a in overlap)}"
+    )
+
+
+def test_default_unsupported_never_covers_a_declared_present_block():
+    """Companion property to the one above: DEFAULT_UNSUPPORTED must also
+    have zero intersection with any address inside any of registers.BLOCKS's
+    10 declared-present blocks -- independent of whether our capture happens
+    to cover that address. This is the property that would have caught
+    round 1's Critical-1 defect (5 of the 10 declared blocks reading as
+    "absent" purely from fixture gaps) if `unsupported` had ever been
+    widened to paper over a gap instead of fixing the fixture."""
+    declared_present_addresses = {addr for block in BLOCKS for addr in block.addresses}
+    unsupported_addresses = {addr for span in DEFAULT_UNSUPPORTED for addr in span}
+    overlap = declared_present_addresses & unsupported_addresses
+    assert overlap == set(), (
+        "DEFAULT_UNSUPPORTED wrongly claims these declared-present "
+        f"addresses are absent: {sorted(hex(a) for a in overlap)}"
+    )
+
+
+# --- synthetic-complete fixture ---------------------------------------------
+
+
+async def test_synthetic_complete_fixture_covers_every_declared_block(
+    justice_registers_synthetic_complete,
+):
+    """Fix round 2, Finding 6: the fixture round 1 added specifically so
+    Task 5's probe could exercise all 10 declared blocks had zero test
+    users -- it was never actually run. Exercise it here: every address
+    inside every block registers.BLOCKS declares present must resolve
+    without raising anything at all."""
+    transport = FakeTransport(justice_registers_synthetic_complete)
+    await transport.connect()
+    for block in BLOCKS:
+        values = await transport.read_holding(block.addr, block.count)
+        assert len(values) == block.count
