@@ -299,23 +299,41 @@ async def test_enum_sensor_with_unmapped_raw_reports_unknown_not_crash(
 
 
 async def test_reprobe_signal_does_not_duplicate_entities(
-    hass, justice_registers_synthetic_complete, enable_custom_integrations
+    hass, justice_registers_synthetic_complete, enable_custom_integrations, caplog
 ):
     """Fix round 1 (Opus review, Finding 6): the `added_field_keys` dedup
-    guard each builder() checks (`if f"sensor:{field.key}" in added:
-    continue`) was never exercised by firing SIGNAL_NEW_ENTITIES a second
-    time -- the signal a future re-probe (Task 14/15) will actually use to
-    pick up newly-SUPPORTED fields without a restart. Firing it manually
-    here (nothing in this task creates a real re-probe trigger yet) with
-    NOTHING newly supported must add zero new entities, not silently
-    duplicate every one that already exists.
+    guard each builder() checks (`if entity_key in added: continue`) was
+    never exercised by firing SIGNAL_NEW_ENTITIES a second time -- the
+    signal a future re-probe (Task 14/15) will actually use to pick up
+    newly-SUPPORTED fields without a restart.
+
+    Fix round 2 (Opus re-review): the first version of this test asserted
+    only `hass.states.async_entity_ids("sensor")` was unchanged
+    before/after -- and that survived the guard being deleted entirely,
+    because HA's OWN entity registry independently refuses a second entity
+    carrying an already-registered `unique_id`
+    ("Platform srne_inverter does not generate unique IDs... already
+    exists - ignoring", one ERROR line per field, confirmed by the reviewer
+    by actually removing the guard) -- so the entity-id-set assertion was
+    proving HA's own registry behaviour, not this integration's dedup
+    guard. `sensor.py`'s builder() now logs a DEBUG line naming the skipped
+    key on that branch specifically (added in this round for exactly this
+    reason); asserting on THAT text is what actually discriminates "our
+    guard skipped it before HA ever saw a duplicate" from "HA rejected a
+    duplicate our own code tried to create". Kept the entity-id-set
+    assertion alongside it: still a true, useful observable, just not
+    sufficient proof by itself (same lesson as Finding 4's caplog fix, one
+    round earlier).
     """
     entry = await setup_entry(hass, FakeTransport(justice_registers_synthetic_complete))
     before = set(hass.states.async_entity_ids("sensor"))
+    caplog.clear()
     async_dispatcher_send(hass, SIGNAL_NEW_ENTITIES.format(entry_id=entry.entry_id))
     await hass.async_block_till_done()
     after = set(hass.states.async_entity_ids("sensor"))
     assert after == before
+    assert "already added, skipping re-probe rebuild" in caplog.text
+    assert "does not generate unique IDs" not in caplog.text
 
 
 def test_display_value_coerces_whole_float_only_at_precision_zero_or_none():

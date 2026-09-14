@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -15,6 +17,8 @@ from .coordinator import SrneCoordinator
 from .entity import SrneEntity, SrneFieldEntity, async_setup_field_platform
 from .probe import BlockSupport
 from .registers import DERIVED, FIELDS, Derived, Field, FieldKind, field_by_key
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _display_value(value: object, precision: int | None) -> object:
@@ -67,14 +71,35 @@ async def async_setup_entry(
         for field in FIELDS:
             if field.write is not None or field.key not in supported:
                 continue
-            if f"sensor:{field.key}" in added:
+            entity_key = f"sensor:{field.key}"
+            if entity_key in added:
+                # Fix round 2 (Opus re-review, the one survivor from Fix
+                # round 1's mutation testing): this branch used to have no
+                # signal of its own -- deleting it entirely left
+                # `hass.states.async_entity_ids()` unchanged before/after a
+                # SIGNAL_NEW_ENTITIES re-fire, because HA's OWN entity
+                # registry independently rejects a second entity carrying
+                # the same unique_id ("Platform srne_inverter does not
+                # generate unique IDs... already exists - ignoring", one
+                # ERROR line per field, confirmed by the reviewer with the
+                # guard removed) -- a test asserting on entity state alone
+                # was proving HA's behaviour, not this guard's. A debug line
+                # naming the skipped key gives this branch its own
+                # observable, and is exactly what a support session
+                # diagnosing "why didn't my re-probe add anything new" would
+                # want to see.
+                _LOGGER.debug("%s already added, skipping re-probe rebuild", entity_key)
                 continue
-            added.add(f"sensor:{field.key}")
+            added.add(entity_key)
             new.append(SrneSensor(coordinator, entry, field))
         for derived in DERIVED:
-            if derived.key not in supported or f"sensor:{derived.key}" in added:
+            if derived.key not in supported:
                 continue
-            added.add(f"sensor:{derived.key}")
+            entity_key = f"sensor:{derived.key}"
+            if entity_key in added:
+                _LOGGER.debug("%s already added, skipping re-probe rebuild", entity_key)
+                continue
+            added.add(entity_key)
             new.append(SrneDerivedSensor(coordinator, entry, derived))
         return new
 
