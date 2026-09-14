@@ -54,20 +54,27 @@ the real `entity_platform`/`device_registry` machinery (not a hand-rolled
 substitute), and is exactly the shape `async_setup_field_platform` exists to
 support -- it is not a workaround invented to force the test to pass.
 
-The second test (`test_entities_become_unavailable_after_a_failed_cycle`) is
-marked `xfail` per the brief's own note: it names
-`sensor.justice_inv_1_battery_soc`, an entity only the REAL sensor platform
-(Task 10) creates. It still uses `justice_registers_synthetic_complete`
+The second test (`test_entities_become_unavailable_after_a_failed_cycle`) was
+marked `xfail` per the brief's own note, on purpose, as a handoff to Task 10:
+it names `sensor.justice_inv_1_battery_soc`, an entity only the REAL sensor
+platform (Task 10) creates. It already used `justice_registers_synthetic_complete`
 (not the brief's plain `justice_registers`) for the same reason as above --
-so that once Task 10 removes the `xfail` marker, the test fails or passes on
-its own merits (does `sensor.justice_inv_1_battery_soc` exist and go
+so that once Task 10 removed the `xfail` marker, the test would fail or pass
+on its own merits (does `sensor.justice_inv_1_battery_soc` exist and go
 unavailable?) rather than on an unrelated `LookupError` out of
-`async_setup_entry` before the sensor platform is even reached.
+`async_setup_entry` before the sensor platform is even reached. Task 10 has
+now landed `sensor.py` and removed the marker -- this passes for real: the
+entity exists with state "55" after setup (`custom_components.srne_inverter.
+sensor.SrneSensor.native_value` reading the coordinator's decoded
+`battery_soc`), and goes `unavailable` after `transport._read_errors` is
+loaded with 20 failures and a refresh runs, because `CoordinatorEntity.
+available` (inherited unchanged by `SrneEntity`, see entity.py's own
+docstring) reads `coordinator.last_update_success`, which the coordinator's
+own `_register_failure` sets to `False` on a failed cycle.
 """
 
 from unittest.mock import patch
 
-import pytest
 from homeassistant.helpers import device_registry as dr
 
 from custom_components.srne_inverter import registers as R
@@ -114,7 +121,6 @@ async def test_device_is_registered_with_serial_identifier(
     assert device.name == "Justice Inv 1"
 
 
-@pytest.mark.xfail(reason="sensor platform lands in Task 10", strict=False)
 async def test_entities_become_unavailable_after_a_failed_cycle(
     hass, justice_registers_synthetic_complete, enable_custom_integrations
 ):
