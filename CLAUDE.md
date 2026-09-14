@@ -1,12 +1,12 @@
 ---
 type: project
 title: ha-srne-inverter
-description: "Integración custom de Home Assistant (`srne_inverter`) para inversores SRNE/BlueSun leídos por logger Solarman (V5, TCP 8899): monitoreo y control local sin nube para Casa Principal Justice (2) y Yoga (6). **Local-only** (sin respaldo GitHub)."
+description: "Integración custom de Home Assistant (`srne_inverter`) para inversores SRNE/BlueSun leídos por logger Solarman (V5, TCP 8899): monitoreo y control local sin nube para Casa Principal Justice (2) y Yoga (6)."
 production: true
 status: active
 stack: [python, home-assistant, pysolarmanv5, modbus, pytest]
 deploy: "Desplegado el 2026-09-14 en el HA de GADI (172.16.10.12): custom_components/srne_inverter copiado por tar sobre SSH a /config/custom_components/, `ha core restart` limpio, 2 config entries (Justice Inv 1/2) creadas por API REST, 174 entidades vivas. Vista Lovelace 'Inversores Justice' creada el mismo día."
-repo: local-only
+repo: "git@github.com:gabrielpc1190/ha-srne-inverter.git"
 tags: [gadi, clientes, rowley, solar, home-assistant]
 related: ["Casa Justice (Main House)", "HomeAssistant", "inverter-bridge"]
 ---
@@ -86,10 +86,11 @@ cruza subredes y sus perfiles no sondean capacidades por unidad. GADI (2 SunGold
   integración) más 2 history-graphs (SOC 24h, corriente de carga desde red 6h). Verificado por lectura del
   config guardado — 0 entidades omitidas.
 - ✅ **Decisiones de Gabriel, 2026-09-14**: autorizó el despliegue (tarea 18), la vista Lovelace (tarea 19) y las
-  escrituras de la prueba en vivo; y decidió que el repo puede pasar a **GitHub privado**
-  (`gabrielpc1190/ha-srne-inverter`), lo que habilita instalar por HACS como repositorio custom. **Todavía no se
-  hizo** — nada se pushea sin OK explícito por separado (además del OK de "puede ir a GitHub"); es un caso
-  aparte, no parte de este plan.
+  escrituras de la prueba en vivo.
+- ✅ **Repo publicado en GitHub privado, 2026-09-14**: `gabrielpc1190/ha-srne-inverter` (SSH, rama `main`), pedido
+  explícito de Gabriel tras cerrar el plan. La rama `feat/srne-inverter-integration` se fusionó (fast-forward) y
+  se borró — toda la historia vive en `main`. Habilita instalar por HACS como repositorio custom (pendiente
+  agregarlo así en el HA de GADI si se quiere reemplazar la instalación manual).
 - ✅ **Plan de 20 tareas cerrado por completo, 2026-09-14** (software, prueba en vivo, despliegue, Lovelace y esta
   documentación). La integración está en **operación normal**, no en desarrollo activo.
 
@@ -129,8 +130,8 @@ existentes que hablan V5 con estos equipos: `Redes-Clientes/CasaJustice/tools/` 
 ## Convenciones
 
 - Código, identifiers, commits (Conventional Commits + `Co-Authored-By: Claude …`) en inglés; docs en español.
-- **Repo local-only, sin remoto todavía**: Gabriel ya decidió (2026-09-14) que puede pasar a GitHub **privado**
-  (`gabrielpc1190/ha-srne-inverter`, para instalar por HACS como repositorio custom) — falta ejecutarlo. Nunca
-  push sin OK explícito, incluso después de crear el remoto.
+- **Repo en GitHub privado desde el 2026-09-14**: `gabrielpc1190/ha-srne-inverter` (SSH, rama `main`), creado para
+  poder instalarlo por HACS como repositorio custom. Nunca push sin OK explícito de Gabriel, aunque el remoto ya
+  exista.
 - `registers.py` y `transport/` **no importan `homeassistant`** (los usa también `tools/probe.py`).
 - Toda escritura a un inversor relee el registro y falla si no coincide. Nada de valores asumidos.
