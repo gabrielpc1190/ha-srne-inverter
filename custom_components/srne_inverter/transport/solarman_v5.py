@@ -94,6 +94,13 @@ class SolarmanV5Transport:
         self.timeout = timeout
         self._lock = asyncio.Lock()
         self._client: PySolarmanV5Async | None = None
+        # Bumped by every close() call, checked by connect() once it has the
+        # lock (see connect()'s docstring) -- the lock alone serialises
+        # connect() and close(), but has no memory of WHICH one ran last. A
+        # close() that completes while a connect() is still queued for the
+        # lock must still win once the connect() gets its turn; this counter
+        # is that memory.
+        self._close_epoch = 0
 
     @property
     def connected(self) -> bool:
@@ -144,8 +151,31 @@ class SolarmanV5Transport:
         also means two concurrent connect() calls cannot both pass the
         `self.connected` check and each open their own socket to a device with
         exactly one slot, leaking the first.
+
+        The lock alone only orders connect() and close() against each other;
+        it does not remember which one won. A close() can acquire the lock
+        FIRST, run its (up to DISCARD_TIMEOUT-bounded) discard, and release it
+        -- with a connect() already queued behind it, e.g. the coordinator's
+        poll timer firing while a manual pause is still tearing down. Without
+        `_close_epoch`, that queued connect() would then run to completion and
+        reopen the logger the instant after the explicit pause released it --
+        the exact outcome close() exists to prevent, reached from the other
+        direction than the one the lock alone fixes. Snapshotting the epoch
+        before queuing, and checking it again once the lock is held, makes "a
+        close that happened while I was waiting cancels my connect" a
+        property of the transport, not a discipline the caller has to
+        remember (Task 12's pause switch should still set its own paused flag
+        before awaiting close() -- this is belt, that is braces).
         """
+        close_epoch = self._close_epoch
         async with self._lock:
+            if self._close_epoch != close_epoch:
+                _LOGGER.debug(
+                    "Abandoning connect() to %s: an explicit close() "
+                    "completed while this connect() was queued for the lock",
+                    self.host,
+                )
+                return
             if self.connected:
                 return
             if self._client is not None:
@@ -211,13 +241,31 @@ class SolarmanV5Transport:
         fires when `self._client is not None`); leaving the reference in
         place means the NEXT connect() or close() call gets another chance to
         finish disconnecting it.
+
+        Every call that actually completes -- even one that finds `_client`
+        already `None` -- bumps `_close_epoch` as its LAST step, not its
+        first. That ordering matters: a connect() invoked while THIS close()
+        is still mid-discard must snapshot the epoch BEFORE this bump (that
+        is what makes it "queued behind a close still in progress" rather
+        than "invoked after a close that already finished"), so it can
+        detect the change once it finally gets the lock (see connect()'s
+        docstring). Bumping at the top instead would make every connect()
+        invoked during the discard window see the post-bump value as its OWN
+        baseline, and the check would never fire -- exactly the bug this
+        exists to fix, just moved one line. A close() that is itself
+        cancelled before reaching its own bump does not bump it at all: there
+        is no "explicit close succeeded" to honour in that case, so a queued
+        connect() is allowed to proceed under the normal rules instead of
+        being forced to abort.
         """
         async with self._lock:
             client = self._client
             if client is None:
+                self._close_epoch += 1
                 return
             await self._discard_client(client)
             self._client = None
+            self._close_epoch += 1
 
     async def read_holding(self, addr: int, count: int) -> list[int]:
         async with self._lock:
@@ -246,7 +294,13 @@ class SolarmanV5Transport:
         The object yielded exposes read_holding/write_holding that reuse the
         lock already held by this context manager -- calling the transport's
         own public read_holding/write_holding from inside this block would
-        deadlock, since asyncio.Lock is not reentrant.
+        deadlock, since asyncio.Lock is not reentrant. Same for connect()
+        (most likely to be reached by accident -- a reconnect-then-retry
+        helper written to call it unconditionally deadlocks the first time
+        it runs inside an atomic() block, in production, on a real
+        transport), a nested atomic() on the same task, and close() (least
+        likely -- see the full list in transport.base.Transport.atomic's
+        docstring, which this mirrors).
 
         The yielded object is invalidated the instant this block exits --
         normally, via an exception, or via cancellation (the `finally` runs

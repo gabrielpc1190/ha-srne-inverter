@@ -498,3 +498,21 @@ async def test_atomic_handle_is_invalidated_after_the_block_exits(justice_regist
         await t.read_holding(0x0100, 1)
     with pytest.raises(RuntimeError):
         await t.write_holding(0x0100, 1)
+
+
+async def test_connect_inside_atomic_deadlocks(justice_registers):
+    """Fix round 3, Finding N2: before this round, FakeTransport.connect()
+    did not take `self._lock`, so this same scenario COMPLETED on the fake
+    while it deadlocked on the real transport -- the fake was modelling the
+    opposite behaviour on exactly the path Task 12 tests. Now that connect()
+    takes the same lock atomic() holds, calling it from inside an atomic()
+    block deadlocks here too, matching the real transport exactly. Bounded
+    so a regression (or a re-drift between fake and real) shows up as a fast
+    failure, never a hang.
+    """
+    transport = FakeTransport(justice_registers)
+    await transport.connect()
+    with pytest.raises(asyncio.TimeoutError):
+        async with asyncio.timeout(0.5):
+            async with transport.atomic():
+                await transport.connect()  # same lock atomic() already holds

@@ -142,6 +142,13 @@ class FakeTransport:
         self.close_count = 0
         self._connected = False
         self._lock = asyncio.Lock()
+        # Mirrors SolarmanV5Transport's _close_epoch exactly (fix round 3,
+        # Finding N2): the lock alone orders connect()/close() against each
+        # other but does not remember which one won. Without this, a
+        # connect() queued behind an in-progress close() would complete
+        # after the close finished and silently reopen the fake -- the
+        # opposite of what a pause switch test (Task 12) needs to see.
+        self._close_epoch = 0
 
     @property
     def connected(self) -> bool:
@@ -153,15 +160,39 @@ class FakeTransport:
         return self.connect_error
 
     async def connect(self) -> None:
-        self.connect_count += 1
-        error = self._next_connect_error()
-        if error is not None:
-            raise error
-        self._connected = True
+        """Fix round 3 (Finding N2): now takes `self._lock`, like the real
+        transport's connect() -- see that class's docstring for why a
+        connect()/close() race matters, and `atomic()`'s docstring for why
+        calling this from inside an `atomic()` block on the same task
+        deadlocks (it did not before this round, since connect() did not
+        take the lock; now it does, on both transports).
+        """
+        close_epoch = self._close_epoch
+        async with self._lock:
+            self.connect_count += 1
+            if self._close_epoch != close_epoch:
+                # An explicit close() completed while this connect() was
+                # queued for the lock -- honour it, exactly like the real
+                # transport, rather than silently reopening the fake right
+                # after a pause released it.
+                return
+            error = self._next_connect_error()
+            if error is not None:
+                raise error
+            self._connected = True
 
     async def close(self) -> None:
-        self.close_count += 1
-        self._connected = False
+        """Fix round 3 (Finding N2): now takes `self._lock`, like the real
+        transport's close(). `_close_epoch` is bumped LAST, not first --
+        see SolarmanV5Transport.close()'s docstring for why the ordering
+        matters: a connect() invoked while THIS close() is still running
+        must snapshot the epoch BEFORE the bump to detect the change once it
+        gets the lock.
+        """
+        async with self._lock:
+            self.close_count += 1
+            self._connected = False
+            self._close_epoch += 1
 
     def _next_read_error(self) -> Exception | None:
         if not self._read_errors:

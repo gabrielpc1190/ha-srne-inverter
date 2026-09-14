@@ -9,6 +9,7 @@ from umodbus.exceptions import IllegalDataAddressError, IllegalDataValueError
 
 from custom_components.srne_inverter.transport.base import (
     InvalidRegisterValueError,
+    Transport,
     TransportBusyError,
     TransportConnectionError,
     TransportProtocolError,
@@ -75,6 +76,30 @@ async def test_connect_builds_client_with_the_right_arguments(factory, client):
         verbose=False,
     )
     client.connect.assert_awaited_once()
+
+
+def test_solarman_v5_transport_satisfies_protocol():
+    """Fix round 3, Finding 3 (Minor): before this test, only `FakeTransport`
+    was checked against `Transport` (tests/test_fake_transport.py) -- nothing
+    stopped the REAL transport from drifting away from the Protocol it is
+    supposed to implement. A single isinstance assertion closes that gap.
+
+    Same limits apply here as to the fake's version of this test (see
+    tests/test_fake_transport.py::test_fake_transport_satisfies_protocol for
+    the full explanation): `Transport` is `@runtime_checkable`, which per
+    `typing`'s own documentation verifies only that the named methods and
+    attributes EXIST -- not their signatures, not whether `read_holding` is
+    actually a coroutine function, not the connection-ownership contract, and
+    not any of this round's locking/latch requirements. It WOULD catch a
+    typo'd rename or a dropped method (e.g. `atomic` going missing again, as
+    it briefly did before Finding 1's fix). It would NOT catch a real
+    transport whose `atomic()` returns something that is not an async
+    context manager, or that silently drops the lock. Treat this the same
+    way: a cheap smoke test for "did I forget to implement a member", not
+    proof of Protocol conformance.
+    """
+    transport = SolarmanV5Transport("h", 1)
+    assert isinstance(transport, Transport)
 
 
 async def test_read_holding_returns_values(client):
@@ -297,6 +322,24 @@ async def test_atomic_and_plain_read_share_the_same_lock(client):
     assert order == ["atomic-write-start", "atomic-write-end", "read-executed"]
 
 
+async def test_connect_inside_atomic_deadlocks(client):
+    """N2 (fix round 3): connect() now shares the same lock atomic() holds
+    (item 3's fix, added after atomic() already existed), so calling it from
+    inside an atomic() block on the same task deadlocks -- the most likely
+    of atomic()'s documented hazards to be reached by accident (a
+    reconnect-then-retry helper written to call connect() unconditionally).
+    Bounded here so a regression -- or the deadlock going away, which would
+    mean the fake and the real transport have drifted again -- shows up as a
+    fast test failure/pass, never a hang.
+    """
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.5):
+            async with transport.atomic():
+                await transport.connect()  # same lock atomic() already holds
+
+
 async def test_connected_reflects_a_session_that_died_in_the_background(client):
     """pysolarmanv5's own reader task nulls .reader/.writer when the
     connection dies without us noticing via a failed read/write (see
@@ -474,6 +517,41 @@ async def test_overlapping_connects_do_not_leak_a_socket(client):
     # The second call, serialised behind the same lock, must see
     # `self.connected` already True once it gets its turn, and return
     # without building or connecting anything a second time.
+    client.connect.assert_awaited_once()
+
+
+async def test_connect_queued_behind_close_still_honours_the_pause(client):
+    """N1 (fix round 3): the lock alone orders connect() and close() against
+    each other, but has no memory of WHICH ONE WON. Item 3's fix covered
+    connect-first ("close racing an in-flight connect still wins", above);
+    this is the mirror -- close() acquires the lock FIRST and a connect()
+    queues behind it (e.g. the coordinator's poll timer firing while a
+    manual pause is still tearing down in _discard_client's up-to-2s window).
+    Without the close-generation epoch, that queued connect() would run to
+    completion once close() releases the lock and reopen the logger the
+    pause switch just released -- the exact outcome close() exists to
+    prevent, reached from the other direction.
+    """
+    disconnect_started = asyncio.Event()
+
+    async def slow_disconnect():
+        disconnect_started.set()
+        await asyncio.sleep(0.02)
+
+    client.disconnect.side_effect = slow_disconnect
+    transport = SolarmanV5Transport("h", 1)
+    await transport.connect()
+
+    async def do_connect():
+        await disconnect_started.wait()
+        await transport.connect()  # queues behind close(), which holds the lock
+
+    await asyncio.gather(transport.close(), do_connect())
+
+    assert transport.connected is False
+    # Only the ORIGINAL connect() at the top of this test ever called
+    # client.connect() -- the queued one detected the epoch change and
+    # aborted before building or connecting anything.
     client.connect.assert_awaited_once()
 
 
