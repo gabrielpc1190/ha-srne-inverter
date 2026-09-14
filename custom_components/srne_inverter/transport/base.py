@@ -145,11 +145,25 @@ class Transport(Protocol):
           handle and uses it later is exactly the bug this requirement
           exists to catch).
 
-        Do NOT call the transport's own public read_holding/write_holding
-        from inside an `atomic()` block on the same task -- both acquire the
-        same non-reentrant lock this context manager already holds, so doing
-        so deadlocks. Use the object this method yields instead; it exposes
-        read_holding/write_holding that reuse the lock already held.
+        Three things deadlock if called from inside an `atomic()` block on
+        the SAME task -- all for the same reason: the transport's lock is not
+        reentrant, and each of these tries to acquire the one this context
+        manager already holds.
+        - The transport's own public `read_holding`/`write_holding`. Use the
+          object this method yields instead; it exposes read_holding/
+          write_holding that reuse the lock already held.
+        - `connect()`. This is the most likely of the three to be reached by
+          accident: a retry helper that reconnects on a failed read/write and
+          then re-attempts the operation, written to call `connect()`
+          unconditionally, deadlocks the FIRST time it runs inside an
+          `atomic()` block, on a real transport, in production -- nothing
+          about calling it outside an `atomic()` block would have exposed
+          this. Reconnecting is the caller's job to do BEFORE opening an
+          `atomic()` block, never inside one.
+        - A second, nested `atomic()` on the same task.
+        - `close()` also deadlocks the same way, but is the least likely of
+          the four to be reached by accident -- pausing mid-transaction is
+          not a pattern any caller has a reason to write.
         """
 
 
