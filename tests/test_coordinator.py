@@ -381,6 +381,30 @@ async def test_probe_propagates_probe_failed_when_nothing_supported(hass, entry)
     assert transport.close_count == 1
 
 
+async def test_support_property_returns_a_copy_not_the_live_dict(
+    hass, entry, justice_registers_synthetic_complete
+):
+    """Fix round 2 (Task 7 review): `coordinator.support` used to return
+    `self.probe_result.support` itself -- the exact dict `_read_due_blocks`
+    mutates in place for the UnsupportedRegisterError reclassification (Fix
+    round 1, Finding 1) and that block-polling and `supported_field_keys()`
+    read directly. Any of the eight downstream tasks mutating what looked
+    like a harmless snapshot would silently corrupt the coordinator's own
+    capability map -- no error, no test to catch it, blast radius is which
+    entities exist and which blocks get polled."""
+    transport = FakeTransport(justice_registers_synthetic_complete)
+    coordinator = build(hass, entry, transport)
+    await coordinator.async_probe()
+
+    borrowed = coordinator.support
+    borrowed[0x0100] = BlockSupport.UNSUPPORTED
+    borrowed.clear()
+
+    assert coordinator.support[0x0100] is BlockSupport.SUPPORTED
+    assert coordinator.probe_result.support[0x0100] is BlockSupport.SUPPORTED
+    assert "battery_soc" in coordinator.supported_field_keys()
+
+
 async def test_write_field_reads_back_and_updates_state(
     hass, entry, justice_registers_synthetic_complete
 ):
