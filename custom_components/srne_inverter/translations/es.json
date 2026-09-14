@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Inversor SRNE por logger Solarman",
-        "description": "Dejá el serial vacío para leerlo de http://<host>/status.html (auth básica admin/admin). En paralelo, el inversor host es esclavo 1 y el segundo es esclavo 2.",
+        "description": "Dejá el serial vacío para leerlo automáticamente de la página de estado del logger (ruta /status.html, auth básica admin/admin, en la dirección ingresada arriba). En paralelo, el inversor host es esclavo 1 y el segundo es esclavo 2.",
         "data": {
           "name": "Nombre",
           "host": "IP del logger",
@@ -16,13 +16,16 @@
     },
     "error": {
       "cannot_connect": "No se pudo conectar con el logger. Revisá la IP y el puerto, y que el logger esté encendido y alcanzable en la red. Si estás seguro de que es alcanzable, alguna otra herramienta (un monitor que quedó corriendo, otra entrada apuntando a este mismo logger) podría estar usando su único cupo de conexión.",
-      "cannot_read_serial": "No se pudo leer el serial de http://<host>/status.html. Escribilo a mano.",
+      "cannot_read_serial": "No se pudo leer el serial de la página de estado del logger (/status.html, auth básica admin/admin). Escribilo a mano.",
       "invalid_serial": "El serial debe ser solo dígitos.",
       "invalid_slave": "El logger respondió pero el inversor no. Revisá el esclavo Modbus (host = 1, segundo = 2).",
+      "wrong_serial": "El equipo en esta dirección respondió, pero con un serial de logger distinto al que ingresaste. Revisá el serial, o dejalo vacío para leerlo automáticamente.",
+      "logger_busy": "Se conectó correctamente, pero otra herramienta tomó la conexión antes de terminar la prueba. Esperá un momento e intentá de nuevo, o cerrá la otra herramienta (un monitor que quedó corriendo, otra entrada apuntando a este mismo logger) que lo está usando.",
       "unknown": "Error inesperado. Mirá el log de Home Assistant."
     },
     "abort": {
-      "already_configured": "Este logger ya está configurado."
+      "already_configured": "El serial de este logger ya está configurado. Cada serial solo puede usarse en una entrada -- esta integración todavía no soporta varios inversores compartiendo un mismo logger RS485 multipunto. La entrada existente no se modificó; eliminala primero si necesitás apuntar a otra dirección o esclavo.",
+      "already_in_progress": "Este logger ya se está configurando en otro flujo. Terminá o cancelá ese primero."
     }
   },
   "options": {

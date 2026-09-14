@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "SRNE inverter via Solarman logger",
-        "description": "Leave the serial empty to read it from http://<host>/status.html (basic auth admin/admin). In a parallel bank the host inverter is slave 1 and the second one is slave 2.",
+        "description": "Leave the serial empty to read it automatically from the logger's own status page (path /status.html, basic auth admin/admin, on the address entered above). In a parallel bank the host inverter is slave 1 and the second one is slave 2.",
         "data": {
           "name": "Name",
           "host": "Logger IP address",
@@ -16,13 +16,16 @@
     },
     "error": {
       "cannot_connect": "Could not connect to the logger. Check the IP address and port, and that the logger is powered on and reachable on the network. If you are sure it is reachable, another tool (a leftover monitor, a second entry pointed at this same logger) may be holding its single connection slot.",
-      "cannot_read_serial": "Could not read the serial from http://<host>/status.html. Enter it by hand.",
+      "cannot_read_serial": "Could not read the serial from the logger's status page (/status.html, basic auth admin/admin). Enter the serial by hand.",
       "invalid_serial": "The serial must be digits only.",
       "invalid_slave": "The logger answered but the inverter did not. Check the Modbus slave id (host = 1, second unit = 2).",
+      "wrong_serial": "The device at this address answered, but with a different logger serial than the one entered. Double-check the serial, or leave it blank to read it automatically.",
+      "logger_busy": "Connected successfully, but another client took the connection away before the check finished. Wait a moment and try again, or close whichever other tool (a leftover monitor, a second entry pointed at this same logger) is polling it.",
       "unknown": "Unexpected error. Check the Home Assistant log."
     },
     "abort": {
-      "already_configured": "This logger is already configured."
+      "already_configured": "This logger's serial is already configured. Each serial can only be used by one entry -- this integration does not yet support several inverters sharing one multi-drop RS485 logger. The existing entry was not changed; remove it first if you need to point it at a different address or slave id.",
+      "already_in_progress": "This logger is already being set up in another configuration flow. Finish or cancel that one first."
     }
   },
   "options": {

@@ -32,18 +32,32 @@ from .const import (
 from .logger_web import LoggerWebError, async_fetch_logger_serial
 from .transport.base import (
     Transport,
+    TransportBusyError,
     TransportConnectionError,
     TransportError,
+    TransportProtocolError,
 )
 from .transport.solarman_v5 import SolarmanV5Transport
 
 _LOGGER = logging.getLogger(__name__)
 
+# pysolarmanv5's own V5 frame validator raises exactly this text (via
+# V5FrameError, translated to TransportProtocolError by
+# transport/solarman_v5.py's _translate) when the device that answered is
+# stamped with a different Solarman V5 logger serial than the one we sent --
+# see pysolarmanv5/pysolarmanv5.py's _v5_frame_decoder. Fix round 1, Finding
+# 4: distinguishing this from every other TransportProtocolError is what
+# lets _async_validate return "wrong_serial" instead of the generic
+# "invalid_slave", which never mentions the serial field at all.
+_WRONG_SERIAL_MARKER = "data logger serial number"
+
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME, default="SRNE Inverter"): str,
         vol.Required(CONF_HOST): str,
-        vol.Required(CONF_PORT, default=DEFAULT_PORT): vol.Coerce(int),
+        vol.Required(CONF_PORT, default=DEFAULT_PORT): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=65535)
+        ),
         vol.Optional(CONF_SERIAL, default=""): str,
         vol.Required(CONF_SLAVE_ID, default=DEFAULT_SLAVE_ID): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=247)
@@ -91,7 +105,24 @@ class SrneConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "invalid_serial"
                 else:
                     await self.async_set_unique_id(serial_text)
-                    self._abort_if_unique_id_configured(updates={CONF_HOST: host})
+                    # Fix round 1, Finding 1: no `updates=` here. The old
+                    # code passed `updates={CONF_HOST: host}`, which
+                    # rewrites the LIVE entry's host as a side effect of
+                    # aborting -- BEFORE `_async_validate` below ever runs,
+                    # so a typo here (the classic re-add-to-check-settings
+                    # mistake) silently pointed a working, LOADED entry at
+                    # the wrong address and kicked off a reload that lands
+                    # it in SETUP_RETRY, with nothing on screen connecting
+                    # cause to effect. HA itself is deprecating exactly this
+                    # combination for entries with an update listener (ours
+                    # has one, since Task 8) -- `report_usage(...,
+                    # breaks_in_ha_version="2026.12.0")` in the installed
+                    # config_entries.py. This integration has no reconfigure
+                    # step (Task 16+ scope, not this one): the only way to
+                    # point an existing serial at a new host is to remove
+                    # the entry and re-add it, which is safe because the
+                    # serial becomes free the moment the old entry is gone.
+                    self._abort_if_unique_id_configured()
                     errors = await self._async_validate(
                         host,
                         int(serial_text),
@@ -126,33 +157,73 @@ class SrneConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _async_validate(
         self, host: str, serial: int, port: int, slave_id: int
     ) -> dict[str, str]:
-        """Open a real connection and read two known registers.
+        """Open a real connection, THEN read two known registers as a
+        deliberately separate phase.
 
-        Error mapping (task-13-brief's Constraint 4, verified against
-        transport/solarman_v5.py's phase-aware `_translate()`): `connect()`
-        NEVER raises `TransportBusyError` -- every connect-phase
-        `NoSocketAvailableError` (refused, unreachable, DNS failure, a
-        mistyped IP) becomes the plain `TransportConnectionError` caught
-        below. `TransportBusyError` is a SUBCLASS of that, reserved for an
-        established session discovered stolen during a later read/write --
-        it is still caught by the same `except TransportConnectionError`
-        branch here (correct: the flow only has one "cannot reach it" error
-        message, `cannot_connect` -- see translations/en.json for why that
-        message does not blame "another client" as its primary story).
+        Fix round 1, Finding 3: the original version of this method wrapped
+        `connect()` and both reads in ONE try/except, catching
+        `TransportConnectionError`. `TransportBusyError` and
+        `TransportTimeoutError` are both SUBCLASSES of that -- so a read
+        that failed with either (which, per Task 4's phase-aware
+        `_translate()`, can only happen AFTER `connect()` already
+        succeeded) was reported as `cannot_connect`, exactly the same as a
+        connect that never opened at all. Concretely: a wrong slave id on a
+        silent bus (no NAK, just silence) times out at the READ phase, and
+        used to send the user to check the IP/network when the slave id
+        they typed was the only wrong thing on screen; a session stolen
+        mid-check used to be indistinguishable from a mistyped IP, even
+        though at the read phase that is a POSITIVE signal, not a guess.
+
+        Splitting into two try blocks fixes both: the first can only ever
+        raise `TransportConnectionError` (per Task 4, `connect()` never
+        raises `TransportBusyError`) and is the only place `cannot_connect`
+        is returned from; the second sees `TransportBusyError` specifically
+        (an honest "it answered, then someone took it" story --
+        `logger_busy`) and folds every other read-phase `TransportError`
+        (including a read-phase `TransportTimeoutError`) into
+        `invalid_slave`, EXCEPT for one that gets its own message (Fix
+        round 1, Finding 4): pysolarmanv5's own V5 frame validator raises a
+        distinctive message when the device that answered is stamped with
+        a different Solarman V5 logger serial than the one we sent --
+        `_WRONG_SERIAL_MARKER` -- which means the SERIAL field is what's
+        wrong, not the slave id, and deserves its own `wrong_serial`
+        message naming that field instead of leaving the user to guess
+        which one of two numbers on screen is the actual problem.
         """
         transport = build_probe_transport(host, serial, port, slave_id)
         try:
-            await transport.connect()
-            await transport.read_holding(0x0014, 1)   # firmware word
-            await transport.read_holding(0x0100, 1)   # battery SOC
-        except TransportConnectionError as err:
-            _LOGGER.debug("Cannot connect to %s: %s", host, err)
-            return {"base": "cannot_connect"}
-        except TransportError as err:
-            # Empty / Acknowledge / IllegalDataAddress here means the slave id
-            # is wrong: the logger answered but the inverter did not.
-            _LOGGER.debug("Bad reply from %s slave %s: %s", host, slave_id, err)
-            return {"base": "invalid_slave"}
+            try:
+                await transport.connect()
+            except TransportConnectionError as err:
+                _LOGGER.debug("Cannot connect to %s: %s", host, err)
+                return {"base": "cannot_connect"}
+
+            try:
+                await transport.read_holding(0x0014, 1)   # firmware word
+                await transport.read_holding(0x0100, 1)   # battery SOC
+            except TransportBusyError as err:
+                _LOGGER.debug("Logger busy validating %s: %s", host, err)
+                return {"base": "logger_busy"}
+            except TransportProtocolError as err:
+                if _WRONG_SERIAL_MARKER in str(err):
+                    _LOGGER.debug(
+                        "Serial mismatch validating %s: %s", host, err
+                    )
+                    return {"base": "wrong_serial"}
+                _LOGGER.debug(
+                    "Bad reply from %s slave %s: %s", host, slave_id, err
+                )
+                return {"base": "invalid_slave"}
+            except TransportError as err:
+                # Empty / Acknowledge / IllegalDataAddress / a read-phase
+                # timeout (silence, not a NAK, but every bit as diagnostic
+                # on hardware this confusable) here means the slave id is
+                # wrong: the logger answered our connection, but the
+                # inverter did not.
+                _LOGGER.debug(
+                    "Bad reply from %s slave %s: %s", host, slave_id, err
+                )
+                return {"base": "invalid_slave"}
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Unexpected error validating %s", host)
             return {"base": "unknown"}
