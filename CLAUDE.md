@@ -129,7 +129,7 @@ existentes que hablan V5 con estos equipos: `Redes-Clientes/ClientA/tools/` (`cl
 
 ## Convenciones
 
-- Código, identifiers, commits (Conventional Commits + `Co-Authored-By: Claude …`) en inglés; docs en español.
+- Código, identifiers, commits (Conventional Commits, sin trailer de co-autoría — Gabriel es el autor, Claude escribe) en inglés; docs en español.
 - **Repo en GitHub PÚBLICO desde el 2026-09-14**: `gabrielpc1190/ha-srne-inverter` (SSH, rama `main`). Se creó
   privado ese mismo día, pero el token OAuth que HACS trae de fábrica (device-flow, cliente `395a8e...`) **no
   tiene ningún scope** y no puede ver repos privados de nadie — para que HACS instalara este repo como
