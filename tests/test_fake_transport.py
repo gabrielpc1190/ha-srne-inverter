@@ -444,7 +444,7 @@ def test_default_unsupported_no_longer_covers_0xe03a_span():
     0xE03A-0xE12F span is PRESENT (0xE03A = [0, 0]; 0xE100/0xE116/0xE121
     answer structured, non-padding data: [0,10,9,65523], [45,0,100,0],
     [200,10,3750,5] -- see progress.md's TASK 17 FINDING 3; not saved to a
-    docs/evidence/*.json file, since the two full probe captures only cover
+    tests/fixtures/evidence/*.json file, since the two full probe captures only cover
     registers.BLOCKS' 10 declared blocks and this span is not one of them
     yet). An address in 0xE03A-0xE0FF must therefore never be in
     DEFAULT_UNSUPPORTED at all."""

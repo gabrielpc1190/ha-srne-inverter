@@ -13,6 +13,8 @@ related: ["Client A site (Main House)", "HomeAssistant", "inverter-bridge"]
 
 # ha-srne-inverter — integración HA para inversores SRNE/BlueSun vía logger Solarman
 
+> 🔴 **Nota 2026-11-16 (D4):** este repo es público (HACS). Los datos del cliente (host, seriales, nombres, evidencias) se retiraron del presente y del historial (reescrito): aquí quedan nombres neutros (`Client A`, `client_inv_N`) y direcciones/seriales ficticios (`192.0.2.x`, `1234567001/2`). En el HA de GADI las entidades vivas conservan el nombre original de la config entry (el nombre sale de la config entry, no del código). Los originales están en `la carpeta del cliente en Redes-Clientes (subcarpeta `inversores-srne/`)`.
+
 ## Qué es y por qué
 
 Gabriel tiene inversores BlueSun 10 kW (base **SRNE**, fw `V8.18.006`, mapa Modbus SRNE V1.96) con logger WiFi
@@ -43,8 +45,8 @@ cruza subredes y sus perfiles no sondean capacidades por unidad. GADI (2 SunGold
   (re-sondeo), `config_flow.py` (formulario en/es con scrape del serial de `status.html`), `diagnostics.py`
   (con scrubbing de host/serial) y `services.py` (`read_register`, `write_register`, `reprobe`).
 - ✅ **Primera corrida contra hardware real, 2026-09-14** — Client A main house, los dos inversores
-  (`192.0.2.240` esclavo 1, `192.0.2.242` esclavo 2). Detalle completo en
-  [`docs/evidence/2026-09-14_live-test-notes.md`](docs/evidence/2026-09-14_live-test-notes.md).
+  (`192.0.2.240` esclavo 1, `192.0.2.242` esclavo 2). Detalle completo en las notas de la
+  prueba en vivo (retiradas de este repo público; viven en la carpeta local del cliente, `Redes-Clientes/<cliente>/inversores-srne/evidence/`).
   - Sondeo: **10/10 bloques soportados en ambos**, sondeo completo en 3,7 s (inv1) / 3,5 s (inv2) — contra un
     plazo de 60 s y un intervalo HOT de 10 s, margen amplio.
   - Escritura: **4 ensayos autorizados** (SOC bajo `0xE01E` 15→16→15; ecualización `0xE007`→142 con BMS activo,
@@ -106,7 +108,7 @@ cruza subredes y sus perfiles no sondean capacidades por unidad. GADI (2 SunGold
 > No hay fecha comprometida para esto.
 >
 > Si en el futuro hace falta tocar código de nuevo (un hallazgo de campo, un firmware distinto en Yoga, etc.),
-> arrancar por [`docs/evidence/2026-09-14_live-test-notes.md`](docs/evidence/2026-09-14_live-test-notes.md) y el
+> arrancar por las notas de la prueba en vivo (fuera de este repo, ver arriba) y el
 > ledger histórico
 > [`.superpowers/sdd/2026-09-13-srne-inverter-integration/progress.md`](.superpowers/sdd/2026-09-13-srne-inverter-integration/progress.md)
 > (no editarlo, es registro histórico) para no repetir terreno ya pisado. Antes de reabrir cualquier prueba

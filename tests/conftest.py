@@ -19,7 +19,7 @@ from custom_components.srne_inverter.registers import BLOCKS
 FIXTURES = Path(__file__).parent / "fixtures"
 
 # Live-hardware evidence from the 2026-09-14 Task 17 run against both real
-# Client A site units (docs/evidence/*.json) -- separate from tests/fixtures/
+# Client A site units (tests/fixtures/evidence/*.json) -- separate from tests/fixtures/
 # (Tasks 1-16's captures): these are newer, narrower captures made to settle
 # specific open register questions, not full-suite golden data. Never edited
 # to plug a test hole, same discipline as tests/fixtures/.
@@ -148,7 +148,7 @@ def client_settings_after_bms_off_fixture() -> dict[int, int]:
 def _load_probe_registers(filename: str) -> dict[int, int]:
     """Flatten a tools/probe.py --json capture's `registers` map ({"0xNNNN":
     raw_value, ...}) into {address: raw_value}. Used for the 2026-09-14
-    Task 17 live probes of both Client A site units (docs/evidence/
+    Task 17 live probes of both Client A site units (tests/fixtures/evidence/
     2026-09-14_probe-inv1.json / _probe-inv2.json), each a full 10/10-block
     snapshot -- unlike tests/fixtures/client_inv1_blocks.json, these cover
     every address inside registers.BLOCKS with no internal gaps.
@@ -161,7 +161,7 @@ def _load_probe_registers(filename: str) -> dict[int, int]:
 def probe_inv1_registers_fixture() -> dict[int, int]:
     """Live 2026-09-14 full-probe capture of Client A site inverter 1
     (192.0.2.240, serial 1234567001, slave 1) -- see
-    docs/evidence/2026-09-14_probe-inv1.json."""
+    tests/fixtures/evidence/2026-09-14_probe-inv1.json."""
     return _load_probe_registers("2026-09-14_probe-inv1.json")
 
 
@@ -169,12 +169,12 @@ def probe_inv1_registers_fixture() -> dict[int, int]:
 def probe_inv2_registers_fixture() -> dict[int, int]:
     """Live 2026-09-14 full-probe capture of Client A site inverter 2
     (192.0.2.242, serial 1234567002, slave 2) -- see
-    docs/evidence/2026-09-14_probe-inv2.json."""
+    tests/fixtures/evidence/2026-09-14_probe-inv2.json."""
     return _load_probe_registers("2026-09-14_probe-inv2.json")
 
 
 def load_client_equalize_distinct() -> dict[int, int]:
-    """Flatten docs/evidence/2026-09-14_inv1-equalize-distinct.json into
+    """Flatten tests/fixtures/evidence/2026-09-14_inv1-equalize-distinct.json into
     {address: raw_value} for E007/E008/E009 only.
 
     The first (and only) real capture in this repo where equalize_voltage

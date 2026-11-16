@@ -2,7 +2,7 @@
 
 Single source of truth for blocks, fields, scales, enums and write ranges.
 Derived from docs/reference/inverter-bridge_srne_map.py and
-docs/reference/ha-solarman-profile_srne_bluesun_client.yaml, cross-checked
+the SRNE/BlueSun Solarman YAML profile (kept outside this repo), cross-checked
 against the live capture of Client A site inverter 1 (firmware V8.18.006).
 
 THIS MODULE MUST NOT IMPORT homeassistant -- tools/probe.py imports it on hosts
@@ -255,7 +255,7 @@ FIELDS: tuple[Field, ...] = (
     # 15.5 A (inv1) / 16.9 A (inv2); 0x0238 read 15.6 A / 17.3 A, tracking
     # load current slightly high, exactly as grid current should in
     # bypass. A second, lower-load sample agreed (load 4.6 A, 0x0238 =
-    # 4.6 A, 0x022B = 0) -- see docs/evidence/2026-09-14_probe-inv1.json /
+    # 4.6 A, 0x022B = 0) -- see tests/fixtures/evidence/2026-09-14_probe-inv1.json /
     # _probe-inv2.json. The old script was right; the YAML profile was
     # wrong. grid_current_l2 moved to 0x0238 below. 0x022B's own meaning is
     # NOT known and is not guessed here -- do not remap another field onto
@@ -315,7 +315,7 @@ FIELDS: tuple[Field, ...] = (
     # today) these three Number entities will raise on every write attempt;
     # that is correct, not a fault to chase. With BMS comm briefly disabled
     # for verification, a write DID succeed immediately (see
-    # docs/evidence/2026-09-14_inv1-equalize-distinct.json and
+    # tests/fixtures/evidence/2026-09-14_inv1-equalize-distinct.json and
     # tests/test_registers.py's test_decode_distinguishes_boost_from_equalize).
     Field(0xE000, 7, "equalize_voltage", "Equalize Voltage", scale=0.4,
           unit=V, device_class="voltage", write=WriteSpec(120, 145),

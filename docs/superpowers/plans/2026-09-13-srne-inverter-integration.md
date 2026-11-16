@@ -24,7 +24,7 @@
 
 ## Design decisions locked by this plan (beyond the spec)
 
-1. **Register addresses come from `docs/reference/ha-solarman-profile_srne_bluesun_client.yaml`**, not from `client_inverters_read.py`. The YAML is confirmed by the raw capture (`0x022A`=1218→121.8 V grid L2, `0x022C`=1231→123.1 V out L2, `0x022E`=5→0.5 A). `client_inverters_read.py` reads grid current L2 at `0x0238` — **that address is left unmapped**; Task 18 (live test) dumps `0x0236–0x0239` to settle it.
+1. **Register addresses come from `the SRNE/BlueSun Solarman YAML profile (kept outside this repo)`**, not from `client_inverters_read.py`. The YAML is confirmed by the raw capture (`0x022A`=1218→121.8 V grid L2, `0x022C`=1231→123.1 V out L2, `0x022E`=5→0.5 A). `client_inverters_read.py` reads grid current L2 at `0x0238` — **that address is left unmapped**; Task 18 (live test) dumps `0x0236–0x0239` to settle it.
 2. **Entity names are English `label` strings on each `Field`** with `has_entity_name = True`; only the config flow, options flow and services are translated (en/es). 60+ per-entity translation keys are not worth the churn in a private integration.
 3. **The probe result is never persisted to disk** — it is recomputed at every `async_setup_entry`, so a firmware change is picked up by a restart. It lives in `runtime_data.support` and is exported in diagnostics.
 4. **`tools/probe.py` imports the core by putting `custom_components/srne_inverter/` on `sys.path`** and importing `registers` / `transport.solarman_v5` as *top-level* modules. That never executes `custom_components/srne_inverter/__init__.py`, so HA is never imported. `registers.py` therefore has **no intra-package imports** (it defines its own constants, it does not import `const.py`).
@@ -449,7 +449,7 @@ Expected: FAIL with `ModuleNotFoundError`/`AttributeError`
 
 Single source of truth for blocks, fields, scales, enums and write ranges.
 Derived from docs/reference/inverter-bridge_srne_map.py and
-docs/reference/ha-solarman-profile_srne_bluesun_client.yaml, cross-checked
+the SRNE/BlueSun Solarman YAML profile (kept outside this repo), cross-checked
 against the live capture of Client A site inverter 1 (firmware V8.18.006).
 
 THIS MODULE MUST NOT IMPORT homeassistant -- tools/probe.py imports it on hosts

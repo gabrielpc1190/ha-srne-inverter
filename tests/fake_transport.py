@@ -48,7 +48,7 @@ DEFAULT_UNSUPPORTED: tuple[range, ...] = (
     # wide -- live reads at Client A site inverter 1 show 0xE03A returns
     # [0, 0] (present, just zero) and 0xE100/0xE116/0xE121 all answer
     # structured, non-padding data ([0,10,9,65523], [45,0,100,0],
-    # [200,10,3750,5]) -- see docs/evidence/2026-09-14_probe-inv1.json.
+    # [200,10,3750,5]) -- see tests/fixtures/evidence/2026-09-14_probe-inv1.json.
     # The entire 0xE03A-0xE12F span is PRESENT on this firmware, confirming
     # the note two paragraphs below about tests/fixtures/
     # client_inv1_blocks.json's own "config_pre"/"config"/"config_post"

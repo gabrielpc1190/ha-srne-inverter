@@ -210,8 +210,8 @@ def test_grid_current_l2_reads_from_0x0238_not_0x022b(
     assert field.address == 0x0238
 
     for registers, expected_raw in (
-        (probe_inv1_registers, 46),   # docs/evidence/2026-09-14_probe-inv1.json
-        (probe_inv2_registers, 185),  # docs/evidence/2026-09-14_probe-inv2.json
+        (probe_inv1_registers, 46),   # tests/fixtures/evidence/2026-09-14_probe-inv1.json
+        (probe_inv2_registers, 185),  # tests/fixtures/evidence/2026-09-14_probe-inv2.json
     ):
         assert registers[0x0238] == expected_raw
         assert registers[0x022B] == 0  # the old, wrong mapping: a confident 0.0 A
@@ -313,7 +313,7 @@ def test_decode_distinguishes_boost_from_equalize(client_equalize_distinct):
     and every existing test, including the golden snapshot, would still
     pass.
 
-    docs/evidence/2026-09-14_inv1-equalize-distinct.json is the first
+    tests/fixtures/evidence/2026-09-14_inv1-equalize-distinct.json is the first
     capture where they differ, obtained live at Client A site inverter 1:
     BMS communication was briefly disabled (E215 -> 0, the gate that
     otherwise pins E007-E009 to one BMS-dictated value -- see registers.py's
