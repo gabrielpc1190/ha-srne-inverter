@@ -89,7 +89,7 @@ cruza subredes y sus perfiles no sondean capacidades por unidad. GADI (2 SunGold
   config guardado — 0 entidades omitidas.
 - ✅ **Decisiones de Gabriel, 2026-09-14**: autorizó el despliegue (tarea 18), la vista Lovelace (tarea 19) y las
   escrituras de la prueba en vivo.
-- ✅ **Repo publicado en GitHub privado, 2026-09-14**: `gabrielpc1190/ha-srne-inverter` (SSH, rama `main`), pedido
+- ✅ **Repo publicado en GitHub, 2026-09-14** (creado privado; ese mismo día se hizo PÚBLICO a propósito para HACS, ver «Repo en GitHub PÚBLICO» más abajo): `gabrielpc1190/ha-srne-inverter` (SSH, rama `main`), pedido
   explícito de Gabriel tras cerrar el plan. La rama `feat/srne-inverter-integration` se fusionó (fast-forward) y
   se borró — toda la historia vive en `main`. Habilita instalar por HACS como repositorio custom (pendiente
   agregarlo así en el HA de GADI si se quiere reemplazar la instalación manual).
@@ -145,3 +145,7 @@ existentes que hablan V5 con estos equipos: `Redes-Clientes/ClientA/tools/` (`cl
   `tools/deploy_to_gadi.sh` — ese script queda como método de respaldo si HACS no está disponible.
 - `registers.py` y `transport/` **no importan `homeassistant`** (los usa también `tools/probe.py`).
 - Toda escritura a un inversor relee el registro y falla si no coincide. Nada de valores asumidos.
+
+## Copia duplicada del mapa de registros (anotado 16-nov-2026)
+
+`docs/reference/inverter-bridge_srne_map.py` es una **copia** de `casa-gadi/inverter-bridge/inverter_bridge/srne_map.py`, que es la fuente (idénticas por `diff` el 16-nov-2026). No se edita aquí: se cambia en `inverter-bridge` y se vuelve a copiar. Los dos repos son públicos en GitHub.
